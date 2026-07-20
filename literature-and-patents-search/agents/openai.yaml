@@ -1,0 +1,7 @@
+interface:
+  display_name: "Literature and Patents Search"
+  short_description: "Search literature, patents, and authorized PDFs"
+  default_prompt: "Use $literature-and-patents-search to search literature and patents, resume checkpoints, and download authorized PDFs with truthful boundary reporting."
+
+policy:
+  allow_implicit_invocation: true

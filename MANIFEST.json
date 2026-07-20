@@ -1,0 +1,167 @@
+{
+  "schema": "laps_release_manifest_v1",
+  "git_head": "6dc45446acf0c0632116d8be6ba88c8bca26f2a2",
+  "git_dirty": true,
+  "files": [
+    {
+      "path": ".gitattributes",
+      "size": 93,
+      "sha256": "b8dca8cc6499f0b7406481668e3066a4065a823d8a7d647f2adfaa363beb8280"
+    },
+    {
+      "path": ".gitignore",
+      "size": 1328,
+      "sha256": "78f0b86ca08a68c07f6cb7e923201253278a6b55680daa70b6f4d56f38e301f7"
+    },
+    {
+      "path": "LICENSE",
+      "size": 1499,
+      "sha256": "8699d77efa9c1e7ff7c0c8fa71735976a4c25e2702369ae9fb7f2a9424daaabb"
+    },
+    {
+      "path": "README.md",
+      "size": 29350,
+      "sha256": "bca1b12d82655054cf83ed2df70f102ae4e3903f1eaeb4278a7a1bfb733bb21e"
+    },
+    {
+      "path": "install.py",
+      "size": 7517,
+      "sha256": "2e768f3dc30a7628555917a88167f57f67287e00f7de840849a9b6b7aebb2e8b"
+    },
+    {
+      "path": "literature-and-patents-search/SKILL.md",
+      "size": 8307,
+      "sha256": "45d3051f20facd77dfbfcbbe6c0ad23319af8fd5eca12c9400607e325c06c6cd"
+    },
+    {
+      "path": "literature-and-patents-search/agents/openai.yaml",
+      "size": 345,
+      "sha256": "788383b3d95e647b18d825113c2135de244e0e83e73ae7a17e660879cbf58bc0"
+    },
+    {
+      "path": "literature-and-patents-search/references/authentication.md",
+      "size": 6383,
+      "sha256": "e53b5455795aaeeab0691fc57ed6eed55ba1d12af91f2cfc8f2e8c191c15f4a1"
+    },
+    {
+      "path": "literature-and-patents-search/references/channels.md",
+      "size": 4952,
+      "sha256": "440ba55f191201cd2a81bc3ac53b61eb6c8856db62e9e9a140dc90f99eec267b"
+    },
+    {
+      "path": "literature-and-patents-search/references/download-help.md",
+      "size": 4689,
+      "sha256": "bb2bb7466f49b0cca44a75126c42d2bb2bd78e25630e355b1869c82c9637bf6f"
+    },
+    {
+      "path": "literature-and-patents-search/references/download-limitations.md",
+      "size": 4010,
+      "sha256": "260e147d32187c1f63067a708d6a0db3659fb442c63250be2d0e77098020c8d2"
+    },
+    {
+      "path": "literature-and-patents-search/references/download-usage.md",
+      "size": 5040,
+      "sha256": "4847b4f67ba3a1720c4550d1b8ab82b4f6c477b31be353504383d3b9ac4db1d3"
+    },
+    {
+      "path": "literature-and-patents-search/references/interface.md",
+      "size": 6093,
+      "sha256": "a5376a3cdff11729016792d9800644dac665858eb270a1fd27b60c7d37e8465d"
+    },
+    {
+      "path": "literature-and-patents-search/references/search-help.md",
+      "size": 5185,
+      "sha256": "9779b2ea508739249f390b238e187c0dcea36408075585ff19b783435f55a7ef"
+    },
+    {
+      "path": "literature-and-patents-search/references/search-limitations.md",
+      "size": 4429,
+      "sha256": "295986baba6a3b0455ec95ea221623120ac8b27cc181b3883b6c12bedeabc506"
+    },
+    {
+      "path": "literature-and-patents-search/scripts/laps_core/__init__.py",
+      "size": 4259,
+      "sha256": "8988dc3477dcf0607ca0d50d51d5db28830eb7944f8c1904dbe6422159bf71b4"
+    },
+    {
+      "path": "literature-and-patents-search/scripts/laps_core/auth_control.py",
+      "size": 58533,
+      "sha256": "daeb23647ed445a1ff10bc744b2b66f61287b2956d21c963c5094d41ad736561"
+    },
+    {
+      "path": "literature-and-patents-search/scripts/laps_core/challenge_protocol.py",
+      "size": 41459,
+      "sha256": "6af8688ed4b25bae08998b5a860f7fbe3cc1ffde7ee3f41642f7e1274656afe1"
+    },
+    {
+      "path": "literature-and-patents-search/scripts/laps_core/contracts.py",
+      "size": 24240,
+      "sha256": "68e30543bfffaab099bcead21c2fc116e021030ffa6650e6b7287c9e3d929f6d"
+    },
+    {
+      "path": "literature-and-patents-search/scripts/laps_core/download_inputs.py",
+      "size": 35587,
+      "sha256": "52bd14f4c2e0d1f6d7155e5ba04bc8a713be3cd257dfdfecd29926f90b988d9c"
+    },
+    {
+      "path": "literature-and-patents-search/scripts/laps_core/environment.py",
+      "size": 42635,
+      "sha256": "d0686e6ecee81271006bce846dec15b5f3af87c07eda86b6d8909e61f7d31f45"
+    },
+    {
+      "path": "literature-and-patents-search/scripts/laps_core/handoff.py",
+      "size": 44570,
+      "sha256": "6ce95c92bfa3a6c8fdad52be4a876c8a15e324f3369e9a47cd860eda933e8fe4"
+    },
+    {
+      "path": "literature-and-patents-search/scripts/laps_core/network_safety.py",
+      "size": 7982,
+      "sha256": "3ac30fd164c4022369b631f4b77d8cccfe41b270def771223f154cfa39c6211d"
+    },
+    {
+      "path": "literature-and-patents-search/scripts/laps_core/registry.py",
+      "size": 39153,
+      "sha256": "f1b6c204b47b3ff5c02be9f668ab6ed18fd258aab0806157b134e1df9531b971"
+    },
+    {
+      "path": "literature-and-patents-search/scripts/laps_core/sqlite_store.py",
+      "size": 17630,
+      "sha256": "272a7078a70442535193c8711fd4fdf4e8e8c70c44377eb269a45679bdfecb4b"
+    },
+    {
+      "path": "literature-and-patents-search/scripts/laps_core/status.py",
+      "size": 3975,
+      "sha256": "af6f5d7c04f4f4fdd093730968ce4a1bc393cd32995fc094a48cd3e749d35473"
+    },
+    {
+      "path": "literature-and-patents-search/scripts/literature_and_patents_download_scripts.py",
+      "size": 705682,
+      "sha256": "4a9a4353023b9c84e2d7dcad4966db2bb79f2a30158abf3e69b72ed93a141c5e"
+    },
+    {
+      "path": "literature-and-patents-search/scripts/literature_and_patents_search_scripts.py",
+      "size": 1072485,
+      "sha256": "4a24ca0cfba464c0848662db7de14204f5d1d309d3c7fd98a20d0bcfe485e895"
+    },
+    {
+      "path": "literature-and-patents-search/tools/check_environment.py",
+      "size": 2442,
+      "sha256": "431087fb21d08f9ee9aae3905405e94c3c233f62099e0e3dcc2579c619cb936d"
+    },
+    {
+      "path": "literature-and-patents-search/tools/codex_hooks/codex_external_control_hook.py",
+      "size": 424151,
+      "sha256": "ea261f586cb23ad5e29981d8e760df499c3ad976695ce049c27c71dd9f74e6db"
+    },
+    {
+      "path": "literature-and-patents-search/tools/codex_hooks/codex_ordinary_chrome_credential_fill.mjs",
+      "size": 8220,
+      "sha256": "64dab2a29ef34b2a8c7e0cb8327ba75f658ba79b74b3ea1d7864855a72eb4f7a"
+    },
+    {
+      "path": "literature-and-patents-search/tools/requirements.txt",
+      "size": 226,
+      "sha256": "ccc545ef66f12293d59255f43366e88515909f024bac468ea1ddb5da591ee550"
+    }
+  ]
+}
