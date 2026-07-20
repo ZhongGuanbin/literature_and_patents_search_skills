@@ -55,7 +55,7 @@ python tools\check_environment.py --prepare --json
 
 ```powershell
 & $py scripts\literature_and_patents_download_scripts.py --channel-inventory
-& $py scripts\literature_and_patents_download_scripts.py --batch-name Orbitrap --dry-run --disable-channel "Sci-Hub"
+& $py scripts\literature_and_patents_download_scripts.py --batch-name Orbitrap --dry-run
 ```
 
 `--channel-inventory` 是当前渠道顺序真值。dry-run 只验证输入、配置与 map；不证明 parser、远端候选或 PDF 成功。
@@ -63,8 +63,8 @@ python tools\check_environment.py --prepare --json
 需要验证一个精确渠道是否会被选中时，用无网络 probe：
 
 ```powershell
-& $py scripts\literature_and_patents_download_scripts.py --batch-name Orbitrap --probe-channel-plan --literature-only --exact-channel "PubMed" --limit 1 --disable-channel "Sci-Hub"
-& $py scripts\literature_and_patents_download_scripts.py --batch-name Orbitrap --probe-channel-plan --patents-only --exact-channel "Google Patents" --limit 1 --disable-channel "Sci-Hub"
+& $py scripts\literature_and_patents_download_scripts.py --batch-name Orbitrap --probe-channel-plan --literature-only --exact-channel "PubMed" --limit 1
+& $py scripts\literature_and_patents_download_scripts.py --batch-name Orbitrap --probe-channel-plan --patents-only --exact-channel "Google Patents" --limit 1
 ```
 
 probe 只证明本地 plan 与 prerequisite 分类，不证明真实网络闭环。
@@ -72,7 +72,7 @@ probe 只证明本地 plan 与 prerequisite 分类，不证明真实网络闭环
 ## 5. 小批量授权下载
 
 ```powershell
-& $py scripts\literature_and_patents_download_scripts.py --batch-name Orbitrap --limit 5 --disable-channel "Sci-Hub"
+& $py scripts\literature_and_patents_download_scripts.py --batch-name Orbitrap --limit 5
 ```
 
 - 只访问公开资源或用户有权访问的来源。
@@ -83,8 +83,8 @@ probe 只证明本地 plan 与 prerequisite 分类，不证明真实网络闭环
 ## 6. 精确记录或渠道诊断
 
 ```powershell
-& $py scripts\literature_and_patents_download_scripts.py --batch-name Orbitrap --literature-only --doi "10.xxxx/example" --exact-channel "PubMed" --limit 1 --disable-channel "Sci-Hub"
-& $py scripts\literature_and_patents_download_scripts.py --batch-name Orbitrap --patents-only --publication-number "US1234567A" --exact-channel "Google Patents" --limit 1 --disable-channel "Sci-Hub"
+& $py scripts\literature_and_patents_download_scripts.py --batch-name Orbitrap --literature-only --doi "10.xxxx/example" --exact-channel "PubMed" --limit 1
+& $py scripts\literature_and_patents_download_scripts.py --batch-name Orbitrap --patents-only --publication-number "US1234567A" --exact-channel "Google Patents" --limit 1
 ```
 
 这是诊断模式，不是正常生产 traversal。缺 key、401/403/429、no candidate 或认证边界都要如实保留。
@@ -94,7 +94,7 @@ probe 只证明本地 plan 与 prerequisite 分类，不证明真实网络闭环
 只在当前渠道实际需要认证时运行：
 
 ```powershell
-& $py scripts\literature_and_patents_download_scripts.py --auth-check --headful --auth-no-state-reuse --exact-auth-channel "<CHANNEL>" --disable-channel "Sci-Hub"
+& $py scripts\literature_and_patents_download_scripts.py --auth-check --headful --auth-no-state-reuse --exact-auth-channel "<CHANNEL>"
 ```
 
 认证配置必须位于用户目录；不要打开、打印、复制或打包秘密值。认证通过后重新运行精确认证检查，确认脱敏报告中的 success/state reuse 标记，再恢复当前记录/渠道。

@@ -43,7 +43,7 @@ python scripts\literature_and_patents_search_scripts.py --batch-name Orbitrap --
 检索完成后运行授权下载：
 
 ```powershell
-python scripts\literature_and_patents_search_scripts.py --keywords "Orbitrap" --batch-name Orbitrap --download-after-search --download-extra-arg=--disable-channel --download-extra-arg=Sci-Hub
+python scripts\literature_and_patents_search_scripts.py --keywords "Orbitrap" --batch-name Orbitrap --download-after-search
 ```
 
 也可在检索后单独调用下载 CLI；这种方式更容易先核对 search status 和 download dry-run。

@@ -17021,7 +17021,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--limit", type=int, default=None, help="Maximum records to process per record type.")
     parser.add_argument("--channel", action="append", default=[], help="Only try channels whose names contain this value. Can be repeated.")
     parser.add_argument("--exact-channel", action="append", default=[], help="Only try channels whose names exactly match this value. Can be repeated.")
-    parser.add_argument("--disable-channel", action="append", default=[], help="Explicitly disable an exact channel name. Can be repeated; Sci-Hub remains enabled unless named here.")
+    parser.add_argument("--disable-channel", action="append", default=[], help="Explicitly disable an exact channel name. Can be repeated; all channels are enabled by default.")
     parser.add_argument(
         "--input-contract",
         choices=("auto", "v2", "legacy"),

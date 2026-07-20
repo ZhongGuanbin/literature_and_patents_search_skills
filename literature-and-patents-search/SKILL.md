@@ -52,11 +52,11 @@ Prefer these forms, replacing `<PY>` and `<SKILL_ROOT>` with resolved absolute p
 <PY> <SKILL_ROOT>/scripts/literature_and_patents_search_scripts.py --keywords <KEYWORDS> --batch-name <BATCH>
 <PY> <SKILL_ROOT>/scripts/literature_and_patents_search_scripts.py --batch-name <BATCH> --materialize-checkpoint
 <PY> <SKILL_ROOT>/scripts/literature_and_patents_download_scripts.py --batch-name <BATCH> --status
-<PY> <SKILL_ROOT>/scripts/literature_and_patents_download_scripts.py --batch-name <BATCH> --dry-run --disable-channel "Sci-Hub"
-<PY> <SKILL_ROOT>/scripts/literature_and_patents_download_scripts.py --batch-name <BATCH> --disable-channel "Sci-Hub"
+<PY> <SKILL_ROOT>/scripts/literature_and_patents_download_scripts.py --batch-name <BATCH> --dry-run
+<PY> <SKILL_ROOT>/scripts/literature_and_patents_download_scripts.py --batch-name <BATCH>
 ```
 
-Disable `Sci-Hub` in normal Skill-driven downloads. Download only material the user is authorized to access. Do not bypass subscriptions, access controls, robots, CAPTCHA, or platform terms.
+Download only material the user is authorized to access. Do not bypass subscriptions, access controls, robots, CAPTCHA, or platform terms.
 
 ## Run the workflow
 

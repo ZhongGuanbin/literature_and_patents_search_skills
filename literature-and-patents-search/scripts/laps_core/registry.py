@@ -266,8 +266,8 @@ _SYNTHETIC_DOWNLOAD_ENDPOINTS = {
 }
 
 
-# The literature order is deliberately the historic 33 priority entries plus
-# CNKI and Wanfang.  Do not sort this table.
+# The literature rows define the canonical download priority.  Do not sort
+# this table: every row is enabled by default and its position is contractual.
 _LITERATURE_DOWNLOAD_ROWS = (
     ("Sci-Hub", "parse_literature_scihub", ("identifier:doi",), "public", (), (), "", ("doi_form", "open_direct_pdf", "robot_challenge_possible"), "free_or_provider_limited", True),
     ("arXiv API", "parse_literature_api_pdf", ("identifier:arxiv_id", "identifier:doi", "locator:landing"), "public", (), (), "", ("open_api", "direct_pdf"), "free_or_provider_limited", True),
@@ -494,6 +494,8 @@ def validate_registry() -> None:
             raise RuntimeError(f"Duplicate channel display name within {key}")
         if any(spec.provider_id not in PROVIDER_BY_ID for spec in specs):
             raise RuntimeError(f"Unknown provider in {key}")
+        if key[0] == "download" and any(not spec.default_enabled for spec in specs):
+            raise RuntimeError(f"Every download channel must be enabled by default for {key}")
     scihub = LITERATURE_DOWNLOAD_ADAPTERS[0]
     if scihub.display_name != "Sci-Hub" or not scihub.default_enabled:
         raise RuntimeError("Sci-Hub must remain first and default enabled")

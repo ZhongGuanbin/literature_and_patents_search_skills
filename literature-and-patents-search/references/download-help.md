@@ -6,7 +6,7 @@
 python scripts/literature_and_patents_download_scripts.py [options]
 ```
 
-下载器消费已有 metadata handoff。Skill 正常工作流只下载公开或用户有权访问的 PDF，并显式传入 `--disable-channel "Sci-Hub"`。
+下载器消费已有 metadata handoff。所有声明的下载渠道默认启用并严格保持 registry 优先级；工作流只下载公开或用户有权访问的 PDF。
 
 ## 核心参数
 

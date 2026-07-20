@@ -13,12 +13,14 @@
 - [核心功能](#核心功能)
 - [架构说明](#架构说明)
 - [快速开始](#快速开始)
+  - [Agent 自然语言安装](#agent-自然语言安装)
 - [支持平台](#支持平台)
 - [能力矩阵](#能力矩阵)
 - [配置和环境要求](#配置和环境要求)
 - [API Key 分级](#api-key-分级)
 - [Agent Skill](#agent-skill)
 - [命令](#命令)
+- [使用范例](#使用范例)
 - [输出](#输出)
 - [排障](#排障)
 - [使用边界](#使用边界)
@@ -44,7 +46,7 @@
 |---|---|
 | Codex Skill | 识别文献/专利任务，选择安全工作流，解释完成证据与失败边界 |
 | 搜索 CLI | 检索元数据，维护 SQLite checkpoint，发布 canonical v2 与兼容 CSV |
-| 下载 CLI | 消费 metadata handoff，按固定渠道顺序尝试授权 PDF，维护 ledger 与报告 |
+| 下载 CLI | 消费 metadata handoff；全部渠道默认启用并严格按 registry 优先级尝试授权 PDF，维护 ledger 与报告 |
 | 环境门禁 | 检查或准备 Skill 自有 Python/Playwright 环境；可选 Chrome/CDP 缺失只降级 |
 | 浏览器交接 | 按 bundled Chromium、Playwright Chrome、普通 Chrome/CDP、Windows 可见控制逐层升级 |
 
@@ -118,6 +120,30 @@ elif [ "$gate_exit" -eq 1 ]; then
 fi
 ```
 
+### Agent 自然语言安装
+
+在 Codex 或其它具备终端能力的 Agent 中，可以直接发送以下提示词。Agent 应把 GitHub 仓库下载到临时目录，完成校验和安装后再删除临时副本；不得覆盖现有 Skill：
+
+```text
+请从 https://github.com/ZhongGuanbin/literature_and_patents_search_skills
+安装 literature-and-patents-search Skill。
+
+1. 只使用该 GitHub 仓库作为安装源，并先核对 MANIFEST.json 中的路径、大小和 SHA-256。
+2. 在发布包根目录先运行 `python install.py --dry-run`。
+3. 只有 dry-run 成功且目标 Skill 不存在时才运行 `python install.py`；若我指定了
+   Codex skills 根目录，则使用 `python install.py --target "<skills-root>"`。
+4. 不得覆盖、删除、合并或迁移已有 Skill、用户状态或配置。
+5. 安装后定位包含 SKILL.md 的目录，运行
+   `python tools/check_environment.py --check --json`。
+6. 只有环境检查退出码为 2 时，才运行
+   `python tools/check_environment.py --prepare --json` 并再次检查；退出码为 1 时停止并报告异常。
+7. 向我报告安装路径、退出码及 ready/degraded/blocked 状态，但不要读取或显示
+   API key、账号、密码、cookie、token、storage state 或浏览器 profile。
+8. 不要自动安装 Chrome 插件、开启 CDP 或修改 Chrome/profile。
+```
+
+只希望预览自定义目标时，可补充一句：“仅运行 `python install.py --target "<skills-root>" --dry-run`，不要执行正式安装。”目标已存在时，正确结果是安全退出并请求用户决定，不是覆盖。
+
 准备完成后，在 Codex 中调用：
 
 ```text
@@ -175,7 +201,7 @@ Python CLI、公开 API 和前两层浏览器能力不要求普通 Chrome 插件
 | PQAI API (Patent Quality AI) | ❌ | 🟡 API | ❌ | 🟡 metadata-origin locator | 检索必需 `PQAI_API_KEY`；下载阶段无 Key | PDF 阶段不调用 PQAI API，也不由公开号合成 URL |
 | PubMed | ✅ NCBI API | ❌ | 🟡 API→Europe PMC→PMC | ❌ | 同 NCBI 可选配置 | 下载成功归因于实际 resolver，不宣称 PubMed 原生 PDF |
 | RSC Publishing | ✅ 公共网页→受限网页 | ❌ | 🟡 受限网页/landing discovery | ❌ | 机构 scope `rsc_publishing` | 登录或 landing 都不是 PDF 完成证据 |
-| Sci-Hub | ❌ | ❌ | 🟡 DOI form/browser | ❌ | 无 Key | 已注册但正常 Skill 运行始终显式禁用；不得绕过授权边界 |
+| Sci-Hub | ❌ | ❌ | 🟡 DOI form/browser | ❌ | 无 Key | 已注册且默认启用；仅处理公开或用户有权访问的内容，不得绕过授权边界 |
 | Semantic Scholar | ✅ 公共网页 | ❌ | 🟡 OpenAlex→Semantic Scholar API | ❌ | 可选 `SEMANTIC_SCHOLAR_API_KEY` | 与 API 来源键独立；报告实际 resolver |
 | Semantic Scholar API | ✅ Graph API | ❌ | ✅ OA API | ❌ | 可选 `SEMANTIC_SCHOLAR_API_KEY` | 无 Key 可匿名降级；无明确 OA URL 即无候选 |
 | Springer | 🟡 SpringerLink API→受限网页 | ❌ | 🟡 同 SpringerLink | ❌ | 必需 `SPRINGER_API_KEY`；机构 scope `springerlink` | legacy alias；不重复计算原生能力 |
@@ -316,16 +342,259 @@ $py = if (Test-Path "tools\.venv\Scripts\python.exe") { "tools\.venv\Scripts\pyt
 | 文献与专利检索 | `& $py scripts\literature_and_patents_search_scripts.py --keywords "Orbitrap, C-trap" --batch-name Orbitrap` |
 | 仅文献 / 仅专利 | 追加 `--literature-only` 或 `--patents-only` |
 | Checkpoint 物化 | `& $py scripts\literature_and_patents_search_scripts.py --batch-name Orbitrap --materialize-checkpoint` |
-| 下载 dry-run | `& $py scripts\literature_and_patents_download_scripts.py --batch-name Orbitrap --dry-run --disable-channel "Sci-Hub"` |
-| 无网络渠道计划 | `& $py scripts\literature_and_patents_download_scripts.py --batch-name Orbitrap --probe-channel-plan --literature-only --exact-channel "PubMed" --limit 1 --disable-channel "Sci-Hub"` |
-| 精确认证检查 | `& $py scripts\literature_and_patents_download_scripts.py --auth-check --headful --auth-no-state-reuse --exact-auth-channel "<CHANNEL>" --disable-channel "Sci-Hub"` |
-| 小批量授权下载 | `& $py scripts\literature_and_patents_download_scripts.py --batch-name Orbitrap --limit 5 --disable-channel "Sci-Hub"` |
+| 下载 dry-run | `& $py scripts\literature_and_patents_download_scripts.py --batch-name Orbitrap --dry-run` |
+| 无网络渠道计划 | `& $py scripts\literature_and_patents_download_scripts.py --batch-name Orbitrap --probe-channel-plan --literature-only --exact-channel "PubMed" --limit 1` |
+| 精确认证检查 | `& $py scripts\literature_and_patents_download_scripts.py --auth-check --headful --auth-no-state-reuse --exact-auth-channel "<CHANNEL>"` |
+| 小批量授权下载 | `& $py scripts\literature_and_patents_download_scripts.py --batch-name Orbitrap --limit 5` |
 
 正常下载不要使用 `--channel` / `--exact-channel` 破坏完整 fallback traversal；这两个参数只用于有界诊断。`--dry-run` 与 `--probe-channel-plan` 不进入真实下载闭环，也不证明 parser、候选或 PDF 成功。
 
 `--probe-channel-plan` 不是只读命令：它可能创建输出目录、ledger、attempt/report/log，并可能初始化批次 Git。`--auth-check` 也会写 `outputs/auth_check_report.csv`，并可能产生受控 auth state/hook 产物；`--auth-no-state-reuse` 只表示强制新登录检查，不表示清除全部状态。认证检查返回 0 也不能替代报告行、订阅和 PDF 证据。
 
 工作流退出码：0=complete/成功只读命令，3=partial，1=致命失败，2=参数或配置错误。环境检查器单独使用 2 表示缺少必需环境。
+
+## 使用范例
+
+以下命令均在 Skill 根目录执行，并沿用“命令”章节定义的 `$py`。将 `<...>` 替换为本机值；API 与登录配置必须放在 Skill 和项目目录之外。Agent 可以确认某个字段是否已配置，但不得读取、回显或复制秘密值。
+
+### 1. 无 API Key：公开文献与专利检索
+
+适用于只允许公开 API、公开网页且不允许账号登录的环境。可以这样告诉 Agent：
+
+```text
+使用 $literature-and-patents-search 检索“Orbitrap ion optics”。
+只使用无 Key 的公开来源，不登录机构账号，不运行计费渠道；分别建立 Public-Literature
+和 Public-Patents 批次。保留每个来源的真实状态，零结果不能解释为已经穷尽。
+```
+
+对应 CLI：
+
+```powershell
+& $py scripts\literature_and_patents_search_scripts.py `
+  --keywords "Orbitrap ion optics" `
+  --batch-name Public-Literature `
+  --literature-only `
+  --literature-source "arXiv API" `
+  --literature-source "Europe PMC" `
+  --literature-source "DOAJ (Directory of Open Access Journals)" `
+  --literature-source "DataCite Search (search.datacite.org)" `
+  --literature-source "DBLP" `
+  --literature-source "OpenReview"
+
+& $py scripts\literature_and_patents_search_scripts.py `
+  --keywords "Orbitrap ion optics" `
+  --batch-name Public-Patents `
+  --patents-only `
+  --patent-source "Google Patents" `
+  --patent-source "WIPO PATENTSCOPE API"
+```
+
+公开来源仍可能出现限流、验证、服务不可用或页面结构变化；这些结果应记录为边界，而不是伪装成完整覆盖。
+
+### 2. 可选 API Key：提高额度并保留匿名降级
+
+适用于已经在外部配置文件中准备 OpenAlex、Semantic Scholar、CORE、OpenAIRE 或联系邮箱，但允许缺失字段匿名降级的环境：
+
+```text
+使用外部 API 配置检索 Orbitrap 离子光学文献。只确认可选 Key 是否已配置，
+不要显示 Key 值。优先运行 OpenAlex、Semantic Scholar、CORE 和 OpenAIRE；
+缺少可选 Key 时继续匿名路径，并报告限流或降级状态。
+```
+
+```powershell
+$env:LAPS_API_CONFIG = "C:\secure\laps-api.json"
+
+& $py scripts\literature_and_patents_search_scripts.py `
+  --keywords "Orbitrap ion optics" `
+  --batch-name Optional-APIs `
+  --literature-only `
+  --literature-source "OpenAlex API" `
+  --literature-source "Semantic Scholar API" `
+  --literature-source "CORE" `
+  --literature-source "OpenAIRE"
+```
+
+配置文件可包含“API Key 分级”列出的可选键，但不得提交到 Git、复制进 Skill 或写入运行报告。匿名路径成功也不代表检索已经穷尽。
+
+### 3. 必需 API Key：运行单个受控渠道
+
+适用于 Lens、EPO OPS、USPTO ODP 或 PQAI 等缺少 Key 就阻塞相应 API 渠道的场景。以下示例要求外部配置已经包含 `EPO_OPS_KEY` 与 `EPO_OPS_SECRET`：
+
+```text
+使用 $literature-and-patents-search 只运行 EPO OPS 专利检索。
+先以脱敏方式确认两个必需字段均已配置；任一缺失就停止该渠道，不能猜测凭据，
+但也不要把该渠道的配置失败扩展成其它来源失败。
+```
+
+```powershell
+$env:LAPS_API_CONFIG = "C:\secure\laps-api.json"
+
+& $py scripts\literature_and_patents_search_scripts.py `
+  --keywords "Orbitrap ion optics" `
+  --batch-name EPO-Orbitrap `
+  --patents-only `
+  --patent-source "EPO Open Patent Services (OPS) API"
+```
+
+Clarivate、IEEE、Elsevier、Springer 的 API 分支同样需要相应 Key，但只有 registry 声明了合法受限网页 fallback 且用户有访问权时，才可继续网页路径。
+
+### 4. 机构订阅：按当前渠道进行认证与下载
+
+适用于用户明确拥有机构订阅，且登录配置已由 `LAPS_RUNTIME_CONFIG` 或 `LAPS_AUTH_CONFIG` 指向 Skill 外部文件的场景：
+
+```text
+检查 Nature 渠道的机构认证。只在经过验证的 Nature/机构 IdP 节点使用当前 scope 的凭据，
+不要预登录其它站点，不要显示账号、密码或 cookie。认证成功后继续 MS-Batch 的授权下载，
+并以实际 PDF 校验、attempt、ledger 和 run report 共同判断结果。
+```
+
+```powershell
+$env:LAPS_RUNTIME_CONFIG = "C:\secure\laps-runtime.json"
+
+& $py scripts\literature_and_patents_download_scripts.py `
+  --auth-check `
+  --headful `
+  --auth-no-state-reuse `
+  --exact-auth-channel "Nature"
+
+& $py scripts\literature_and_patents_download_scripts.py `
+  --batch-name MS-Batch `
+  --literature-only `
+  --limit 5
+```
+
+`--auth-check` 会写认证报告和受控状态，不是只读操作。登录成功只证明当前认证步骤，不证明订阅覆盖，更不等于 PDF 下载成功。
+
+### 5. Google BigQuery：显式费用授权
+
+适用于已配置 Google 服务凭证，而且用户明确批准本次计费查询的专利检索：
+
+```text
+使用 Google BigQuery 检索 Orbitrap 相关专利。先确认外部配置中的
+GOOGLE_APPLICATION_CREDENTIALS 已设置，并再次确认我明确批准本次计费来源。
+只授权精确来源“Google BigQuery”；不要把这次批准复用于其它批次或费用操作。
+```
+
+```powershell
+$env:LAPS_API_CONFIG = "C:\secure\laps-api.json"
+
+& $py scripts\literature_and_patents_search_scripts.py `
+  --keywords "Orbitrap ion optics" `
+  --batch-name BigQuery-Orbitrap `
+  --patents-only `
+  --patent-source "Google BigQuery" `
+  --allow-cost-source "Google BigQuery"
+```
+
+服务凭证与精确的 `--allow-cost-source` 缺一不可。普通检索授权、已有凭证或历史运行都不能代替本次费用批准。
+
+### 6. 批量关键词、断点续跑与 checkpoint 物化
+
+适用于长时间、多来源批次。关键词文件使用 UTF-8；每行可以包含一个或多个逗号分隔短语：
+
+```powershell
+$keywordsFile = "D:\work\keywords.txt"
+
+& $py scripts\literature_and_patents_search_scripts.py `
+  --keywords-file $keywordsFile `
+  --batch-name MS-Batch `
+  --page-size 50
+
+& $py scripts\literature_and_patents_search_scripts.py `
+  --batch-name MS-Batch `
+  --status
+
+& $py scripts\literature_and_patents_search_scripts.py `
+  --keywords-file $keywordsFile `
+  --batch-name MS-Batch `
+  --page-size 50
+
+& $py scripts\literature_and_patents_search_scripts.py `
+  --batch-name MS-Batch `
+  --materialize-checkpoint
+```
+
+同一批次和兼容请求范围再次运行就是正常续跑，不存在 `--resume` 参数。`--page-size` 是每个 API/page 的请求量，不是总结果上限；`--refresh` 会重置选定来源完成状态，`--force` 会重新检索，二者都不能代替普通续跑。
+
+### 7. 授权 PDF：dry-run、小批量下载和完成证据
+
+适用于 metadata handoff 已生成，准备按固定渠道优先级下载用户有权访问的 PDF：
+
+```text
+继续 MS-Batch 的文献 PDF 下载。先检查 search status，再运行 download dry-run；
+dry-run 没有致命错误后按 registry 原始顺序处理最多 5 条记录。
+不要用 exact-channel 改写正常 fallback 顺序。完成后重新查看状态，并核对实际 PDF、
+attempt、ledger、success/failure 视图和 download_run_report.json。
+```
+
+```powershell
+& $py scripts\literature_and_patents_search_scripts.py `
+  --batch-name MS-Batch `
+  --status
+
+& $py scripts\literature_and_patents_download_scripts.py `
+  --batch-name MS-Batch `
+  --literature-only `
+  --dry-run
+
+& $py scripts\literature_and_patents_download_scripts.py `
+  --batch-name MS-Batch `
+  --literature-only `
+  --limit 5
+
+& $py scripts\literature_and_patents_download_scripts.py `
+  --batch-name MS-Batch `
+  --status
+```
+
+所有下载渠道初始化为默认启用，并严格以 registry 顺序定义优先级。`--dry-run` 只检查环境、输入、配置和 map，不证明 parser、候选或 PDF 成功。
+
+### 8. 单条记录或单渠道诊断
+
+适用于排查某个 DOI、公开号或 adapter，不用于替代正常完整 traversal：
+
+```powershell
+& $py scripts\literature_and_patents_download_scripts.py `
+  --batch-name MS-Batch `
+  --probe-channel-plan `
+  --literature-only `
+  --doi "10.xxxx/example" `
+  --exact-channel "PubMed" `
+  --limit 1
+
+& $py scripts\literature_and_patents_download_scripts.py `
+  --batch-name MS-Batch `
+  --probe-channel-plan `
+  --patents-only `
+  --publication-number "US1234567A" `
+  --exact-channel "Google Patents" `
+  --limit 1
+```
+
+`--probe-channel-plan` 不调用 API、浏览器、网页或 PDF 下载，但可能写入 plan、ledger、attempt、report 和日志。它只证明本地选择与 prerequisite 分类。
+
+### 9. 普通 Chrome 插件与 current-task full CDP
+
+适用于前两层浏览器无法收敛、当前页面仍是可操作验证节点的情况。不存在自动安装插件或自动开启 CDP 的 CLI 参数：
+
+```text
+当前授权页面在 bundled Chromium 和 Playwright Chrome 中都未收敛。
+请先告诉我需要人工完成的步骤，不要修改 Chrome/profile：确认普通 Chrome，确认 Codex Chrome
+插件已安装并启用，确认插件连接当前任务，再由我为当前任务开启 full CDP。
+只有当前任务的只读 Page.getFrameTree 成功后才标记该层 ready；拒绝、策略阻止或超时就跳过该层。
+```
+
+人工权限完成后，仍使用现有认证诊断入口：
+
+```powershell
+& $py scripts\literature_and_patents_download_scripts.py `
+  --auth-check `
+  --headful `
+  --auth-no-state-reuse `
+  --exact-auth-channel "Nature"
+```
+
+该命令不会强制进入普通 Chrome 层；只有前两层失败且当前节点仍可操作时才升级。Windows 可见控制仍要求已证明目标 URL、当前事件绑定和单动作预算。
 
 ## 输出
 
@@ -391,7 +660,6 @@ literature_and_patents_pdf/<name>/
 - 仅访问公开内容或用户依法、依合同和机构订阅有权访问的资源。
 - 遵守平台条款、robots、限流、费用审批、机构政策与适用法律。
 - 不绕过 paywall、订阅、访问控制、CAPTCHA、MFA、验证或宿主安全提示。
-- 正常 Skill 下载始终显式禁用 `Sci-Hub`。
 - 不伪造题名、作者、年份、摘要、DOI、公开号、URL、来源、认证、下载成功或穷尽性结论。
 - 不从 DOI、题名、公开号、raw ID 或 URL pattern 合成未观察到的详情/PDF URL。
 - 不把登录、候选、HTTP 200 HTML、dry-run、probe 或未校验文件称为 PDF 成功。
