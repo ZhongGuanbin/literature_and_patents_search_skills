@@ -1,0 +1,2 @@
+# Normalize detected text files to LF for reproducible byte-level hashes.
+* text=auto eol=lf

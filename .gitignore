@@ -1,0 +1,71 @@
+# Managed Python/runtime caches
+**/.venv/
+**/python_packages/
+**/__pycache__/
+**/*.py[cod]
+**/.pytest_cache/
+**/.mypy_cache/
+**/.ruff_cache/
+
+# Playwright runtimes and caches
+**/ms-playwright/
+**/playwright-browsers/
+**/.playwright/
+**/playwright-report/
+**/test-results/
+
+# Authentication/browser state and hook events
+**/auth_state/
+**/auth_states/
+**/browser_state/
+**/browser_profile/
+**/browser_profiles/
+**/storage_state/
+**/storage_states/
+**/events/
+**/*.auth.json
+**/*.attestation.json
+**/*.browser.json
+**/*.external_session.json
+**/*.storage_state.json
+**/cookie.json
+**/cookies.json
+
+# Logs and generated outputs
+**/run_logs/
+**/logs/
+**/output/
+**/outputs/
+**/literature_and_patents_metadata_list/
+**/literature_and_patents_pdf/
+**/*.log
+**/*.sqlite
+**/*.sqlite3
+**/*.db
+**/*.csv
+**/*.jsonl
+**/*.pdf
+**/*.part
+**/*.tmp
+**/search_run_report.json
+**/search_progress.json
+**/workflow_run_report.json
+**/download_run_report.json
+**/input_migration_report.v2.json
+**/handoff_manifest.v2.json
+**/literature_records.v2.json
+**/patent_records.v2.json
+
+# Sensitive runtime configuration
+**/.env
+**/.env.*
+!**/.env.example
+!**/.env.sample
+**/config.json
+**/literature_and_patents_search_scripts.json
+**/*credential*.json
+**/*secret*.json
+**/*token*.json
+
+# Bounded environment preparation lock
+**/.environment_bootstrap.lock
