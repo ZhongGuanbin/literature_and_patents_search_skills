@@ -140,8 +140,8 @@
     },
     {
       "path": "literature-and-patents-search/scripts/literature_and_patents_search_scripts.py",
-      "size": 1072485,
-      "sha256": "4a24ca0cfba464c0848662db7de14204f5d1d309d3c7fd98a20d0bcfe485e895"
+      "size": 1163798,
+      "sha256": "43391cb90c94f676f304b29f7236b126dadf24224d0103018b82b5a4273e0a84"
     },
     {
       "path": "literature-and-patents-search/tools/check_environment.py",
@@ -150,8 +150,8 @@
     },
     {
       "path": "literature-and-patents-search/tools/codex_hooks/codex_external_control_hook.py",
-      "size": 424151,
-      "sha256": "ea261f586cb23ad5e29981d8e760df499c3ad976695ce049c27c71dd9f74e6db"
+      "size": 450214,
+      "sha256": "a271190cd6dc3d460157b649e2bf65e166a756e8fa652c6f3430640c485f66ad"
     },
     {
       "path": "literature-and-patents-search/tools/codex_hooks/codex_ordinary_chrome_credential_fill.mjs",

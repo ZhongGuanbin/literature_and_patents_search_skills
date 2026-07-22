@@ -147,6 +147,7 @@ ORDINARY_CHROME_EXTERNAL_SESSION_SIDECAR_SCHEMA = (
     "laps_ordinary_chrome_external_session_v1"
 )
 ORDINARY_CHROME_EXTERNAL_SESSION_TRANSPORT = "ordinary_chrome_cdp"
+LITERATURE_BATCH_EXPORT_SNAPSHOT_SCHEMA = "laps_browser_batch_export_v1"
 ORDINARY_CHROME_EXTERNAL_SESSION_DEFAULT_TTL_SECONDS = 12 * 60 * 60
 ORDINARY_CHROME_EXTERNAL_SESSION_MAX_TTL_SECONDS = 7 * 24 * 60 * 60
 SUPPORTED_BROWSER_NAMES = frozenset({"chromium", "chrome"})
@@ -302,6 +303,9 @@ WANFANG_BROWSER_TRANSPORT_RETRY_REASONS = frozenset(
         "wanfang_keyword_result_page_drift",
         "wanfang_search_form_not_ready",
         "wanfang_search_results_not_ready",
+        "wanfang_batch_page_size_50_navigation_failed",
+        "wanfang_batch_page_size_50_not_confirmed",
+        "literature_batch_next_page_navigation_failed",
     }
 )
 WEB_FALLBACK_SOURCES = {
@@ -1923,9 +1927,9 @@ literature_source_auth_policy: dict[str, SourceAccessPolicy] = {
             InstitutionAuthEntry("cnki_fsso", CNKI_FSSO_HOME),
         ),
         note=(
-            "Use the dedicated CNKI browser parser. Public metadata search remains "
-            "available without login; configured institution access can expose "
-            "authorized detail metadata and observed PDF download links. Production "
+            "Use the dedicated CNKI all-pages batch-export parser. Inclusion requires "
+            "an explicit DOI in the exported citation; the literature search path "
+            "does not open individual detail pages or infer DOI metadata. Production "
             "runs reuse an already authenticated institution/IP session and never "
             "log it out; logout/relogin is test-only."
         ),
@@ -1945,10 +1949,11 @@ literature_source_auth_policy: dict[str, SourceAccessPolicy] = {
             InstitutionAuthEntry("wanfang_fsso", WANFANG_FSSO_HOME),
         ),
         note=(
-            "Use the dedicated Wanfang browser adapter for journals, theses, "
-            "conference papers, and science and technology reports. Production "
-            "runs reuse an exact configured-institution/IP session and never log "
-            "it out; logout/relogin is test-only."
+            "Use the dedicated Wanfang all-pages batch-export adapter for journals, "
+            "theses, conference papers, and science and technology reports. "
+            "Inclusion requires an explicit DOI in the exported citation. Production "
+            "runs reuse an exact configured-institution/IP session and never log it "
+            "out; logout/relogin is test-only."
         ),
     ),
 }
@@ -4541,11 +4546,17 @@ def ordinary_chrome_external_snapshot_cache_key(
     auth_state_scope: str,
     record_type: Literal["literature", "patent"],
     keyword: str,
+    checkpoint_path: str = "",
+    resource_key: str = "",
 ) -> str:
     material = (
         f"{safe_slug(auth_state_scope)}|{record_type}|"
         f"{ordinary_chrome_external_keyword_digest(keyword)}"
     )
+    if checkpoint_path or resource_key:
+        material += (
+            f"|{safe_slug(checkpoint_path)}|{safe_slug(resource_key)}"
+        )
     return hashlib.sha256(material.encode("ascii")).hexdigest()[:32]
 
 
@@ -4588,6 +4599,8 @@ def save_ordinary_chrome_external_session(
         scope,
         selected_record_type,
         keyword,
+        first_string(snapshots[0].get("checkpoint_path")),
+        first_string(snapshots[0].get("resource_key")),
     )
     snapshot_dir = ordinary_chrome_external_snapshot_dir(
         config,
@@ -4726,7 +4739,11 @@ def load_ordinary_chrome_external_session(
         page_count = int(loaded.get("snapshot_page_count") or 0)
     except (TypeError, ValueError):
         return None, "ordinary_chrome_external_session_invalid"
-    if not 1 <= page_count <= 100:
+    batch_snapshot_session = literature_batch_export_snapshot_required(
+        source,
+        selected_record_type,
+    )
+    if page_count < 1 or (not batch_snapshot_session and page_count > 100):
         return None, "ordinary_chrome_external_session_invalid"
     cache_key = first_string(loaded.get("snapshot_cache_key"))
     source_for_snapshot = first_string(loaded.get("source"))
@@ -10154,6 +10171,55 @@ class WebSourceParserProfile:
     next_links: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class LiteratureBatchExportProfile:
+    result_rows: tuple[str, ...]
+    clear_actions: tuple[str, ...]
+    row_selection_controls: tuple[str, ...]
+    select_all_actions: tuple[str, ...]
+    selected_count_selectors: tuple[str, ...]
+    export_actions: tuple[str, ...]
+    export_host_suffixes: tuple[str, ...]
+    export_path: str
+    export_entry_selector: str
+    export_content_selector: str | None = None
+    max_page_size: int = 50
+
+
+@dataclass(frozen=True)
+class LiteratureBatchExportEntry:
+    source: str
+    ordinal: int
+    citation: str
+    normalized_citation: str
+    doi: str | None
+
+
+@dataclass(frozen=True)
+class LiteratureBatchMatch:
+    result_record: LiteratureRecord
+    export_entry: LiteratureBatchExportEntry
+
+
+@dataclass(frozen=True)
+class LiteratureBatchMatchResult:
+    matches: tuple[LiteratureBatchMatch, ...]
+    records: tuple[LiteratureRecord, ...]
+    raw_count: int
+    dropped_count: int
+    signature_material: tuple[str, ...]
+
+
+class LiteratureBatchExportError(ValueError):
+    def __init__(self, reason: str, detail: str = "") -> None:
+        self.reason = first_string(reason) or "literature_batch_export_error"
+        self.detail = safe_error_text(detail)
+        message = self.reason
+        if self.detail:
+            message = f"{message}:{self.detail}"
+        super().__init__(message)
+
+
 WEB_SOURCE_PARSER_PROFILES: dict[str, WebSourceParserProfile] = {
     "Web of Science Starter API (Clarivate)": WebSourceParserProfile(("app-record", "[data-ta='record']", ".search-results-item"), ("a[data-ta='summary-record-title-link']", "h3 a"), (".summary-record", ".authors", ".source"), ("a[aria-label='Next page']", "button[aria-label='Next page']")),
     "IEEE Xplore API": WebSourceParserProfile(("xpl-results-item", ".List-results-items", "article"), ("h2 a", "h3 a", ".result-item-title a"), (".author", ".description", ".publisher-info-container"), ("button[aria-label='Next']", "a[aria-label='Next']")),
@@ -10244,6 +10310,59 @@ WEB_SOURCE_PARSER_PROFILES: dict[str, WebSourceParserProfile] = {
             "a[rel='next']",
             "a[aria-label='下一页']",
         ),
+    ),
+}
+
+
+LITERATURE_BATCH_EXPORT_PROFILES: dict[str, LiteratureBatchExportProfile] = {
+    CNKI_SOURCE: LiteratureBatchExportProfile(
+        result_rows=("table.result-table-list tbody tr",),
+        clear_actions=(
+            "a.btn-clearall",
+        ),
+        row_selection_controls=(
+            ".cbItem",
+        ),
+        select_all_actions=(
+            "#selectCheckAll1",
+        ),
+        selected_count_selectors=(
+            "text=/已选\\s*\\d+/",
+        ),
+        export_actions=(
+            ".dropdown-analysis-btns li.export ul.secondUl "
+            "li a[exporttype='GBTREFER']",
+        ),
+        export_host_suffixes=("kns.cnki.net",),
+        export_path="/dm8/manage/export.html",
+        export_entry_selector="ul.literature-list.leftalign > li",
+    ),
+    WANFANG_SOURCE: LiteratureBatchExportProfile(
+        result_rows=(
+            ".normal-list.periodical-list",
+            ".normal-list.thesis-list",
+            ".normal-list.conference-list",
+            ".normal-list.nstr-list",
+        ),
+        clear_actions=(
+            "span.clear-btn",
+        ),
+        row_selection_controls=(
+            ".title-area .wf-checkbox.checkbox input.ivu-checkbox-input",
+        ),
+        select_all_actions=(
+            ".bottom-check-bar input.ivu-checkbox-input",
+        ),
+        selected_count_selectors=(
+            "text=/已选择\\s*\\d+\\s*条/",
+        ),
+        export_actions=(
+            "span.export-btn:has-text('批量引用')",
+        ),
+        export_host_suffixes=("www.wanfangdata.com.cn",),
+        export_path="/export",
+        export_entry_selector=".reference-list > .list-item.c-clearfix",
+        export_content_selector="span.content",
     ),
 }
 
@@ -10475,6 +10594,460 @@ WEB_SOURCE_TRANSIENT_ERROR_MARKERS: dict[str, tuple[tuple[str, str], ...]] = {
         ("error: 405", "semantic_scholar_web_http_405"),
     ),
 }
+
+
+EXPLICIT_EXPORT_DOI_LABEL_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9_])DOI\s*[:：]\s*"
+    r"(10\.\d{4,9}/[^\s\"'<>]+)",
+    flags=re.IGNORECASE,
+)
+EXPLICIT_EXPORT_DOI_URL_PATTERN = re.compile(
+    r"(?:https?:)?//(?:dx\.)?doi\.org/"
+    r"(10\.\d{4,9}/[^\s\"'<>]+)",
+    flags=re.IGNORECASE,
+)
+
+
+def normalize_literature_batch_title(value: Any) -> str:
+    """Normalize an observed title/citation without reconstructing metadata."""
+
+    normalized = unicodedata.normalize(
+        "NFKC",
+        html.unescape(first_string(value)),
+    ).casefold()
+    return re.sub(r"[\W_]+", "", normalized, flags=re.UNICODE)
+
+
+def _clean_explicit_export_doi(value: Any) -> str:
+    candidate = html.unescape(urllib.parse.unquote(first_string(value))).strip()
+    candidate = candidate.strip("<>[]{}【】（）")
+    candidate = candidate.rstrip(".,;:，。；：、")
+    return clean_extracted_doi(candidate)
+
+
+def _export_entry_node(value: Any) -> Any:
+    if callable(getattr(value, "get_text", None)) and callable(
+        getattr(value, "select", None)
+    ):
+        return value
+    from bs4 import BeautifulSoup
+
+    return BeautifulSoup(first_string(value), "html.parser")
+
+
+def extract_explicit_export_dois(entry: Any) -> tuple[str, ...]:
+    """Return the single explicit DOI observed in one export entry, if any.
+
+    Bare DOI-shaped text is deliberately ignored.  Evidence must be attached to
+    a ``DOI:`` label or a doi.org URL/link.  Distinct DOI values in one entry are
+    an integrity error rather than a choose-first condition.
+    """
+
+    node = _export_entry_node(entry)
+    entry_text = html.unescape(first_string(node.get_text(" ", strip=True)))
+    observed: list[str] = []
+
+    for match in EXPLICIT_EXPORT_DOI_LABEL_PATTERN.finditer(entry_text):
+        doi = _clean_explicit_export_doi(match.group(1))
+        if doi and doi not in observed:
+            observed.append(doi)
+
+    for match in EXPLICIT_EXPORT_DOI_URL_PATTERN.finditer(entry_text):
+        doi = _clean_explicit_export_doi(match.group(1))
+        if doi and doi not in observed:
+            observed.append(doi)
+
+    for link in node.select("a[href], link[href]"):
+        href = html.unescape(first_string(link.get("href"))).strip()
+        if href.startswith("//"):
+            href = f"https:{href}"
+        try:
+            link_host = (urllib.parse.urlsplit(href).hostname or "").casefold()
+        except ValueError:
+            link_host = ""
+        if link_host not in {"doi.org", "dx.doi.org"}:
+            continue
+        doi = extract_doi_from_url(href)
+        if doi and doi not in observed:
+            observed.append(doi)
+
+    if len(observed) > 1:
+        raise LiteratureBatchExportError(
+            "literature_batch_export_doi_conflict",
+            f"distinct_dois={len(observed)}",
+        )
+    return tuple(observed)
+
+
+def extract_explicit_export_doi(entry: Any) -> str:
+    values = extract_explicit_export_dois(entry)
+    return values[0] if values else ""
+
+
+def literature_batch_export_url_matches(source: str, value: Any) -> bool:
+    profile = LITERATURE_BATCH_EXPORT_PROFILES.get(source)
+    if profile is None:
+        return False
+    try:
+        parsed = urllib.parse.urlsplit(first_string(value))
+    except ValueError:
+        return False
+    hostname = (parsed.hostname or "").casefold().rstrip(".")
+    if (
+        parsed.scheme.casefold() != "https"
+        or not hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or bool(parsed.fragment)
+    ):
+        return False
+    if any(
+        any(
+            marker in first_string(key).casefold()
+            for marker in (
+                "token",
+                "session",
+                "cookie",
+                "password",
+                "credential",
+                "authorization",
+                "secret",
+                "ticket",
+            )
+        )
+        for key, _ in urllib.parse.parse_qsl(
+            parsed.query,
+            keep_blank_values=True,
+        )
+    ):
+        return False
+    if not any(
+        hostname == suffix.casefold()
+        or hostname.endswith(f".{suffix.casefold()}")
+        for suffix in profile.export_host_suffixes
+    ):
+        return False
+    observed_path = (parsed.path or "").rstrip("/") or "/"
+    expected_path = profile.export_path.rstrip("/") or "/"
+    return observed_path.casefold() == expected_path.casefold()
+
+
+def _clean_literature_export_citation(value: Any) -> str:
+    citation = unicodedata.normalize("NFKC", html.unescape(first_string(value)))
+    citation = re.sub(r"\s+", " ", citation).strip()
+    return re.sub(
+        r"^(?:\[\s*\d+\s*\]|\d+\s*[.、])\s*",
+        "",
+        citation,
+        count=1,
+    ).strip()
+
+
+def _parse_literature_batch_export(
+    html_text: str,
+    source: str,
+) -> tuple[LiteratureBatchExportEntry, ...]:
+    from bs4 import BeautifulSoup
+
+    profile = LITERATURE_BATCH_EXPORT_PROFILES.get(source)
+    if profile is None:
+        raise LiteratureBatchExportError(
+            "literature_batch_export_source_unsupported",
+            source,
+        )
+    soup = BeautifulSoup(html_text or "", "html.parser")
+    entries: list[LiteratureBatchExportEntry] = []
+    for ordinal, node in enumerate(soup.select(profile.export_entry_selector), start=1):
+        content_node = (
+            node.select_one(profile.export_content_selector)
+            if profile.export_content_selector
+            else node
+        )
+        if content_node is None:
+            raise LiteratureBatchExportError(
+                "literature_batch_export_content_missing",
+                f"source={source};entry={ordinal}",
+            )
+        citation = _clean_literature_export_citation(
+            content_node.get_text(" ", strip=True)
+        )
+        if not citation:
+            raise LiteratureBatchExportError(
+                "literature_batch_export_citation_missing",
+                f"source={source};entry={ordinal}",
+            )
+        doi = extract_explicit_export_doi(node)
+        entries.append(
+            LiteratureBatchExportEntry(
+                source=source,
+                ordinal=ordinal,
+                citation=citation,
+                normalized_citation=normalize_literature_batch_title(citation),
+                doi=doi or None,
+            )
+        )
+    return tuple(entries)
+
+
+def parse_cnki_batch_export(
+    html_text: str,
+) -> tuple[LiteratureBatchExportEntry, ...]:
+    return _parse_literature_batch_export(html_text, CNKI_SOURCE)
+
+
+def parse_wanfang_batch_export(
+    html_text: str,
+) -> tuple[LiteratureBatchExportEntry, ...]:
+    return _parse_literature_batch_export(html_text, WANFANG_SOURCE)
+
+
+def _normalized_phrase_present(phrase: str, text: str) -> bool:
+    if not phrase or not text:
+        return False
+    return phrase in text
+
+
+def _maximal_batch_title_candidates(
+    candidates: set[int],
+    normalized_titles: tuple[str, ...],
+) -> set[int]:
+    return {
+        candidate
+        for candidate in candidates
+        if not any(
+            candidate != other
+            and normalized_titles[candidate] != normalized_titles[other]
+            and _normalized_phrase_present(
+                normalized_titles[candidate],
+                normalized_titles[other],
+            )
+            for other in candidates
+        )
+    }
+
+
+def _batch_candidate_evidence_score(
+    record: LiteratureRecord,
+    normalized_citation: str,
+) -> tuple[int, int]:
+    year_match = int(
+        record.year is not None
+        and re.search(
+            rf"(?<!\d){re.escape(str(record.year))}(?!\d)",
+            normalized_citation,
+        )
+        is not None
+    )
+    author_matches = sum(
+        1
+        for author in record.authors
+        if (
+            (normalized_author := normalize_literature_batch_title(author))
+            and _normalized_phrase_present(normalized_author, normalized_citation)
+        )
+    )
+    return year_match, author_matches
+
+
+def _batch_perfect_matching(
+    candidate_sets: tuple[frozenset[int], ...],
+    blocked_edge: tuple[int, int] | None = None,
+) -> dict[int, int] | None:
+    record_to_entry: dict[int, int] = {}
+
+    def assign(entry_index: int, visited_records: set[int]) -> bool:
+        for record_index in sorted(candidate_sets[entry_index]):
+            if blocked_edge == (entry_index, record_index):
+                continue
+            if record_index in visited_records:
+                continue
+            visited_records.add(record_index)
+            previous_entry = record_to_entry.get(record_index)
+            if previous_entry is None or assign(previous_entry, visited_records):
+                record_to_entry[record_index] = entry_index
+                return True
+        return False
+
+    for entry_index in sorted(
+        range(len(candidate_sets)),
+        key=lambda index: (len(candidate_sets[index]), index),
+    ):
+        if not assign(entry_index, set()):
+            return None
+    return {
+        entry_index: record_index
+        for record_index, entry_index in record_to_entry.items()
+    }
+
+
+def _record_with_export_doi(
+    record: LiteratureRecord,
+    export_doi: str | None,
+) -> LiteratureRecord:
+    doi = normalize_doi(export_doi)
+    identifiers = {
+        first_string(key): first_string(value)
+        for key, value in record.identifiers.items()
+        if first_string(key).casefold() != "doi" and first_string(value)
+    }
+    if doi:
+        identifiers["doi"] = doi
+    return replace(
+        record,
+        doi=doi or None,
+        url=None,
+        identifiers=identifiers,
+    )
+
+
+def normalized_literature_batch_citation_evidence(
+    entry: LiteratureBatchExportEntry,
+) -> str:
+    normalized = normalize_literature_batch_title(entry.citation)
+    normalized_doi = normalize_literature_batch_title(entry.doi)
+    if normalized_doi:
+        normalized = normalized.replace(normalized_doi, "")
+    return normalized
+
+
+def match_batch_export_entries(
+    result_records: Iterable[LiteratureRecord],
+    export_entries: Iterable[LiteratureBatchExportEntry],
+) -> LiteratureBatchMatchResult:
+    """Match one complete result page after all export sub-batches are joined.
+
+    Calling this per sub-batch would let batch position disambiguate duplicate
+    titles.  The count and one-to-one checks therefore intentionally cover the
+    complete page in one operation.
+    """
+
+    records = tuple(result_records)
+    entries = tuple(export_entries)
+    if len(records) != len(entries):
+        raise LiteratureBatchExportError(
+            "literature_batch_export_count_mismatch",
+            f"results={len(records)};entries={len(entries)}",
+        )
+    if not records:
+        return LiteratureBatchMatchResult((), (), 0, 0, ())
+    entry_sources = {entry.source for entry in entries}
+    if len(entry_sources) != 1 or next(iter(entry_sources)) not in (
+        CNKI_SOURCE,
+        WANFANG_SOURCE,
+    ):
+        raise LiteratureBatchExportError(
+            "literature_batch_export_source_mismatch"
+        )
+    entry_source = next(iter(entry_sources))
+    if any(record.source != entry_source for record in records):
+        raise LiteratureBatchExportError(
+            "literature_batch_export_source_mismatch"
+        )
+
+    normalized_titles = tuple(
+        normalize_literature_batch_title(record.title) for record in records
+    )
+    if any(not title for title in normalized_titles):
+        raise LiteratureBatchExportError(
+            "literature_batch_export_result_title_missing"
+        )
+    normalized_citations = tuple(
+        normalized_literature_batch_citation_evidence(entry) for entry in entries
+    )
+    if any(not citation for citation in normalized_citations):
+        raise LiteratureBatchExportError(
+            "literature_batch_export_citation_missing"
+        )
+
+    candidate_sets: list[frozenset[int]] = []
+    for entry_index, entry in enumerate(entries):
+        normalized_citation = normalized_citations[entry_index]
+        candidates = {
+            record_index
+            for record_index, title in enumerate(normalized_titles)
+            if _normalized_phrase_present(title, normalized_citation)
+        }
+        candidates = _maximal_batch_title_candidates(candidates, normalized_titles)
+        if not candidates:
+            raise LiteratureBatchExportError(
+                "literature_batch_export_title_unmatched",
+                f"entry={entry_index + 1}",
+            )
+        if len(candidates) > 1:
+            scores = {
+                record_index: _batch_candidate_evidence_score(
+                    records[record_index],
+                    normalized_citation,
+                )
+                for record_index in candidates
+            }
+            best_score = max(scores.values())
+            if best_score > (0, 0):
+                candidates = {
+                    record_index
+                    for record_index, score in scores.items()
+                    if score == best_score
+                }
+        candidate_sets.append(frozenset(candidates))
+
+    frozen_candidate_sets = tuple(candidate_sets)
+    mapping = _batch_perfect_matching(frozen_candidate_sets)
+    if mapping is None or len(mapping) != len(entries):
+        raise LiteratureBatchExportError(
+            "literature_batch_export_one_to_one_match_failed"
+        )
+    for entry_index, record_index in mapping.items():
+        if _batch_perfect_matching(
+            frozen_candidate_sets,
+            blocked_edge=(entry_index, record_index),
+        ) is not None:
+            raise LiteratureBatchExportError(
+                "literature_batch_export_title_ambiguous",
+                f"entry={entry_index + 1}",
+            )
+
+    entry_by_record = {
+        record_index: entries[entry_index]
+        for entry_index, record_index in mapping.items()
+    }
+    entry_index_by_record = {
+        record_index: entry_index
+        for entry_index, record_index in mapping.items()
+    }
+    matches: list[LiteratureBatchMatch] = []
+    accepted_records: list[LiteratureRecord] = []
+    signature_material: list[str] = []
+    for record_index, record in enumerate(records):
+        entry = entry_by_record[record_index]
+        matched_record = _record_with_export_doi(record, entry.doi)
+        matches.append(
+            LiteratureBatchMatch(
+                result_record=matched_record,
+                export_entry=entry,
+            )
+        )
+        if matched_record.doi:
+            accepted_records.append(matched_record)
+        signature_material.append(
+            hashlib.sha256(
+                "\x1f".join(
+                    (
+                        normalized_titles[record_index],
+                        unicodedata.normalize("NFKC", first_string(record.raw_id)),
+                        normalized_citations[entry_index_by_record[record_index]],
+                        first_string(entry.doi),
+                    )
+                ).encode("utf-8")
+            ).hexdigest()
+        )
+
+    return LiteratureBatchMatchResult(
+        matches=tuple(matches),
+        records=tuple(accepted_records),
+        raw_count=len(matches),
+        dropped_count=len(matches) - len(accepted_records),
+        signature_material=tuple(signature_material),
+    )
 
 
 def classify_ieee_results_readiness(html_text: str, body_text: str) -> str:
@@ -12629,6 +13202,393 @@ def snapshot_url_is_valid_for_source(
     )
 
 
+LITERATURE_BATCH_EXPORT_SNAPSHOT_FIELDS = frozenset(
+    {
+        "schema",
+        "event_id",
+        "source",
+        "keyword",
+        "auth_state_scope",
+        "search_record_type",
+        "checkpoint_path",
+        "resource_key",
+        "page_number",
+        "page_size",
+        "final_url",
+        "html",
+        "result_count",
+        "selected_before",
+        "exports",
+        "next_page_number",
+        "next_url",
+        "has_next_control",
+        "explicit_no_results",
+        "exhausted",
+        "created_at",
+    }
+)
+LITERATURE_BATCH_EXPORT_SNAPSHOT_EXPORT_FIELDS = frozenset(
+    {
+        "batch_number",
+        "selected_count",
+        "export_url",
+        "export_html",
+        "export_count",
+        "selected_after_clear",
+    }
+)
+LITERATURE_BATCH_EXPORT_FORBIDDEN_MARKUP = re.compile(
+    r"<(?:script|style|form|input|textarea|select|button|iframe|object|embed|meta|link|img)\b",
+    re.IGNORECASE,
+)
+LITERATURE_BATCH_EXPORT_ALLOWED_HTML_ATTRIBUTES = frozenset(
+    {"class", "title", "datetime", "content", "name", "rel", "href"}
+)
+LITERATURE_BATCH_EXPORT_SENSITIVE_QUERY_MARKERS = (
+    "token",
+    "session",
+    "cookie",
+    "password",
+    "credential",
+    "authorization",
+    "secret",
+    "ticket",
+)
+
+
+def literature_batch_export_snapshot_required(
+    source: str,
+    record_type: Literal["literature", "patent"] | str,
+) -> bool:
+    return record_type == "literature" and source in {
+        CNKI_SOURCE,
+        WANFANG_SOURCE,
+    }
+
+
+def _batch_snapshot_url_has_sensitive_query(value: str) -> bool:
+    try:
+        parsed = urllib.parse.urlsplit(value)
+    except ValueError:
+        return True
+    return any(
+        any(marker in key.casefold() for marker in LITERATURE_BATCH_EXPORT_SENSITIVE_QUERY_MARKERS)
+        for key, _ in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+    )
+
+
+def _batch_snapshot_url_parts(value: Any) -> urllib.parse.SplitResult | None:
+    try:
+        parsed = urllib.parse.urlsplit(first_string(value))
+    except ValueError:
+        return None
+    if (
+        parsed.scheme.casefold() != "https"
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.fragment
+        or _batch_snapshot_url_has_sensitive_query(first_string(value))
+    ):
+        return None
+    return parsed
+
+
+def literature_batch_result_url_matches(
+    source: str,
+    value: Any,
+    resource_key: str = "",
+) -> bool:
+    parsed = _batch_snapshot_url_parts(value)
+    if parsed is None:
+        return False
+    hostname = (parsed.hostname or "").casefold().rstrip(".")
+    path = (parsed.path or "/").rstrip("/").casefold()
+    if source == CNKI_SOURCE:
+        return hostname == "kns.cnki.net"
+    if source == WANFANG_SOURCE:
+        return (
+            hostname == "s.wanfangdata.com.cn"
+            and resource_key in {key for key, _, _ in WANFANG_RESOURCE_PATHS}
+            and path == f"/{resource_key}"
+        )
+    return False
+
+
+def literature_batch_snapshot_html_is_clean(
+    html_text: str,
+    source: str,
+) -> bool:
+    if not html_text.strip() or LITERATURE_BATCH_EXPORT_FORBIDDEN_MARKUP.search(html_text):
+        return False
+    try:
+        from bs4 import BeautifulSoup
+
+        soup = BeautifulSoup(html_text, "html.parser")
+        for node in soup.find_all(True):
+            for name, raw_value in tuple(node.attrs.items()):
+                lowered = first_string(name).casefold()
+                if lowered not in LITERATURE_BATCH_EXPORT_ALLOWED_HTML_ATTRIBUTES:
+                    return False
+                if lowered != "href":
+                    continue
+                href = first_string(raw_value)
+                if not href or href.startswith(("#", "/", "./", "../")):
+                    continue
+                parsed = _batch_snapshot_url_parts(href)
+                if parsed is None:
+                    return False
+                hostname = (parsed.hostname or "").casefold().rstrip(".")
+                allowed_suffixes = (
+                    ("cnki.net", "doi.org")
+                    if source == CNKI_SOURCE
+                    else ("wanfangdata.com.cn", "doi.org")
+                )
+                if not any(
+                    hostname == suffix or hostname.endswith(f".{suffix}")
+                    for suffix in allowed_suffixes
+                ):
+                    return False
+        return True
+    except Exception:
+        return False
+
+
+def literature_batch_snapshot_result_count(
+    html_text: str,
+    source: str,
+    resource_key: str = "",
+) -> int:
+    from bs4 import BeautifulSoup
+
+    soup = BeautifulSoup(html_text or "", "html.parser")
+    selector = (
+        "table.result-table-list tbody tr"
+        if source == CNKI_SOURCE
+        else (
+            f".normal-list.{resource_key}-list"
+            if resource_key
+            else ".normal-list"
+        )
+    )
+    return len(soup.select(selector))
+
+
+def load_literature_batch_export_snapshot(
+    path_value: str,
+    *,
+    expected_source: str,
+    expected_keyword: str,
+    expected_event_id: str = "",
+    expected_auth_state_scope: str = "",
+    expected_checkpoint_path: str = "",
+    expected_resource_key: str = "",
+    require_managed_path: bool = False,
+) -> tuple[dict[str, Any] | None, str]:
+    if not path_value:
+        return None, "ordinary_chrome_batch_export_snapshot_required"
+    try:
+        path = Path(path_value).expanduser().resolve()
+        if require_managed_path and not any(
+            resolved_path_is_within(path, root)
+            for root in (verification_events_root() / "search_snapshots", AUTH_STATE_DIR)
+        ):
+            return None, "ordinary_chrome_batch_export_snapshot_path_invalid"
+        if not path.is_file() or path.stat().st_size > 25 * 1024 * 1024:
+            return None, "ordinary_chrome_batch_export_snapshot_missing_or_oversized"
+        loaded = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, RuntimeError, ValueError, json.JSONDecodeError):
+        return None, "ordinary_chrome_batch_export_snapshot_invalid"
+    if not isinstance(loaded, dict):
+        return None, "ordinary_chrome_batch_export_snapshot_invalid"
+    if loaded.get("schema") != LITERATURE_BATCH_EXPORT_SNAPSHOT_SCHEMA:
+        return None, "ordinary_chrome_batch_export_snapshot_required"
+    if set(loaded) != LITERATURE_BATCH_EXPORT_SNAPSHOT_FIELDS:
+        return None, "ordinary_chrome_batch_export_snapshot_fields_invalid"
+    if (
+        first_string(loaded.get("source")) != expected_source
+        or first_string(loaded.get("keyword")) != expected_keyword
+        or first_string(loaded.get("search_record_type")) != "literature"
+        or (
+            expected_event_id
+            and first_string(loaded.get("event_id")) != expected_event_id
+        )
+        or (
+            expected_auth_state_scope
+            and first_string(loaded.get("auth_state_scope"))
+            != expected_auth_state_scope
+        )
+    ):
+        return None, "ordinary_chrome_batch_export_snapshot_scope_mismatch"
+    checkpoint_path = first_string(loaded.get("checkpoint_path"))
+    resource_key = first_string(loaded.get("resource_key"))
+    if expected_checkpoint_path and checkpoint_path != expected_checkpoint_path:
+        return None, "ordinary_chrome_batch_export_snapshot_checkpoint_mismatch"
+    if expected_resource_key and resource_key != expected_resource_key:
+        return None, "ordinary_chrome_batch_export_snapshot_resource_mismatch"
+    if expected_source == CNKI_SOURCE:
+        if resource_key:
+            return None, "ordinary_chrome_batch_export_snapshot_resource_mismatch"
+    elif expected_source == WANFANG_SOURCE:
+        allowed_resources = {key for key, _, _ in WANFANG_RESOURCE_PATHS}
+        if resource_key not in allowed_resources or not checkpoint_path.endswith(
+            f":{resource_key}"
+        ):
+            return None, "ordinary_chrome_batch_export_snapshot_resource_mismatch"
+    else:
+        return None, "ordinary_chrome_batch_export_snapshot_source_unsupported"
+    try:
+        page_number = int(loaded.get("page_number"))
+        page_size = int(loaded.get("page_size"))
+        result_count = int(loaded.get("result_count"))
+        selected_before = int(loaded.get("selected_before"))
+    except (TypeError, ValueError):
+        return None, "ordinary_chrome_batch_export_snapshot_counts_invalid"
+    raw_next_page_number = loaded.get("next_page_number")
+    if raw_next_page_number is None:
+        next_page_number: int | None = None
+    else:
+        try:
+            next_page_number = int(raw_next_page_number)
+        except (TypeError, ValueError):
+            return None, "ordinary_chrome_batch_export_snapshot_counts_invalid"
+    if (
+        page_number < 1
+        or page_size != 50
+        or not 0 <= result_count <= 50
+        or selected_before != 0
+        or not first_string(loaded.get("created_at"))
+    ):
+        return None, "ordinary_chrome_batch_export_snapshot_counts_invalid"
+    html_text = loaded.get("html")
+    if not isinstance(html_text, str) or not literature_batch_snapshot_html_is_clean(
+        html_text,
+        expected_source,
+    ):
+        return None, "ordinary_chrome_batch_export_snapshot_html_invalid"
+    if literature_batch_snapshot_result_count(
+        html_text,
+        expected_source,
+        resource_key,
+    ) != result_count:
+        return None, "ordinary_chrome_batch_export_snapshot_result_count_mismatch"
+    final_url = first_string(loaded.get("final_url"))
+    if not literature_batch_result_url_matches(
+        expected_source,
+        final_url,
+        resource_key,
+    ):
+        return None, "ordinary_chrome_batch_export_snapshot_result_url_invalid"
+    if expected_source == WANFANG_SOURCE:
+        final_query = urllib.parse.parse_qs(
+            urllib.parse.urlsplit(final_url).query,
+            keep_blank_values=True,
+        )
+        if (
+            final_query.get("p") != [str(page_number)]
+            or final_query.get("s") != ["50"]
+            or len(final_query.get("q", [])) != 1
+            or not acs_search_query_matches(final_query["q"][0], expected_keyword)
+        ):
+            return None, "ordinary_chrome_batch_export_snapshot_result_url_invalid"
+    exports = loaded.get("exports")
+    if not isinstance(exports, list):
+        return None, "ordinary_chrome_batch_export_snapshot_exports_invalid"
+    selected_total = 0
+    normalized_exports: list[dict[str, Any]] = []
+    for expected_batch_number, export in enumerate(exports, start=1):
+        if not isinstance(export, dict) or set(export) != LITERATURE_BATCH_EXPORT_SNAPSHOT_EXPORT_FIELDS:
+            return None, "ordinary_chrome_batch_export_snapshot_export_fields_invalid"
+        try:
+            batch_number = int(export.get("batch_number"))
+            selected_count = int(export.get("selected_count"))
+            export_count = int(export.get("export_count"))
+            selected_after_clear = int(export.get("selected_after_clear"))
+        except (TypeError, ValueError):
+            return None, "ordinary_chrome_batch_export_snapshot_export_counts_invalid"
+        export_html = export.get("export_html")
+        export_url = first_string(export.get("export_url"))
+        if (
+            batch_number != expected_batch_number
+            or not 1 <= selected_count <= 50
+            or export_count != selected_count
+            or selected_after_clear != 0
+            or not isinstance(export_html, str)
+            or not literature_batch_snapshot_html_is_clean(
+                export_html,
+                expected_source,
+            )
+            or not literature_batch_export_url_matches(expected_source, export_url)
+        ):
+            return None, "ordinary_chrome_batch_export_snapshot_export_invalid"
+        try:
+            parsed_entries = (
+                parse_cnki_batch_export(export_html)
+                if expected_source == CNKI_SOURCE
+                else parse_wanfang_batch_export(export_html)
+            )
+        except LiteratureBatchExportError as exc:
+            return None, exc.reason
+        if len(parsed_entries) != export_count:
+            return None, "ordinary_chrome_batch_export_snapshot_export_count_mismatch"
+        selected_total += selected_count
+        normalized_exports.append(dict(export))
+    explicit_no_results = bool(loaded.get("explicit_no_results"))
+    exhausted = bool(loaded.get("exhausted"))
+    has_next_control = bool(loaded.get("has_next_control"))
+    next_url = first_string(loaded.get("next_url"))
+    if selected_total != result_count:
+        return None, "ordinary_chrome_batch_export_snapshot_selection_count_mismatch"
+    if explicit_no_results:
+        if result_count or exports or not exhausted:
+            return None, "ordinary_chrome_batch_export_snapshot_no_results_invalid"
+    elif result_count == 0:
+        return None, "ordinary_chrome_batch_export_snapshot_empty_results_invalid"
+    if not exhausted and result_count != 50:
+        return None, "ordinary_chrome_batch_export_snapshot_page_size_invalid"
+    if exhausted:
+        if has_next_control or next_page_number is not None or next_url:
+            return None, "ordinary_chrome_batch_export_snapshot_next_state_invalid"
+    else:
+        if not has_next_control or next_page_number != page_number + 1:
+            return None, "ordinary_chrome_batch_export_snapshot_next_state_invalid"
+        if expected_source == CNKI_SOURCE:
+            if next_url:
+                return None, "ordinary_chrome_batch_export_snapshot_next_state_invalid"
+        else:
+            if not literature_batch_result_url_matches(
+                expected_source,
+                next_url,
+                resource_key,
+            ):
+                return None, "ordinary_chrome_batch_export_snapshot_next_url_invalid"
+            query = urllib.parse.parse_qs(
+                urllib.parse.urlsplit(next_url).query,
+                keep_blank_values=True,
+            )
+            if (
+                query.get("p") != [str(next_page_number)]
+                or query.get("s") != ["50"]
+                or len(query.get("q", [])) != 1
+                or not acs_search_query_matches(query["q"][0], expected_keyword)
+                or wanfang_literature_result_url(
+                    next_url,
+                    resource_key,
+                    next_page_number,
+                )
+                != next_url
+            ):
+                return None, "ordinary_chrome_batch_export_snapshot_next_url_invalid"
+    normalized = dict(loaded)
+    normalized["page_number"] = page_number
+    normalized["page_size"] = page_size
+    normalized["result_count"] = result_count
+    normalized["selected_before"] = selected_before
+    normalized["next_page_number"] = next_page_number
+    normalized["exports"] = normalized_exports
+    return normalized, "ordinary_chrome_batch_export_snapshot_valid"
+
+
 def load_sanitized_search_snapshot(
     path_value: str,
     *,
@@ -12748,11 +13708,30 @@ def validate_ordinary_chrome_external_search_resume(
         return None, "ordinary_chrome_external_session_capability_invalid"
     attestation = control.external_session_attestation
     event_id = first_string(attestation.get("event_id"))
-    expected_scope = source_auth_state_scope(source, policy)
+    event_name = first_string(control.protocol_request.get("event")).casefold()
+    policy_scope = source_auth_state_scope(source, policy)
+    expected_scope = first_string(
+        control.protocol_request.get("auth_state_scope")
+    )
+    if (
+        expected_scope not in {"", policy_scope}
+        or (event_name == "auth_challenge" and expected_scope != policy_scope)
+    ):
+        return None, "ordinary_chrome_external_session_attestation_invalid"
+    session_state_attested = bool(
+        (
+            event_name == "auth_challenge"
+            and attestation.get("authenticated") is True
+        )
+        or (
+            event_name == "search_challenge"
+            and attestation.get("page_access_confirmed") is True
+        )
+    )
     if (
         attestation.get("schema")
         != ORDINARY_CHROME_EXTERNAL_SESSION_ATTESTATION_SCHEMA
-        or attestation.get("authenticated") is not True
+        or not session_state_attested
         or first_string(attestation.get("source")) != source
         or first_string(attestation.get("auth_state_scope")) != expected_scope
         or first_string(attestation.get("institution_identity_digest"))
@@ -12768,16 +13747,35 @@ def validate_ordinary_chrome_external_search_resume(
         return None, "ordinary_chrome_external_session_snapshot_required"
     snapshots: list[dict[str, Any]] = []
     seen_pages: set[int] = set()
+    task_context = SEARCH_TASK_CONTEXT.get()
+    checkpoint_path = first_string(
+        task_context.get("checkpoint_path") or task_context.get("path")
+    )
+    resource_key = first_string(task_context.get("wanfang_resource_key"))
     for path_value in paths:
-        snapshot = load_sanitized_search_snapshot(
-            path_value,
-            expected_source=source,
-            expected_keyword=keyword,
-            expected_event_id=event_id,
-            expected_auth_state_scope=expected_scope,
-            expected_record_type=record_type,
-            require_managed_path=True,
-        )
+        if literature_batch_export_snapshot_required(source, record_type):
+            snapshot, snapshot_reason = load_literature_batch_export_snapshot(
+                path_value,
+                expected_source=source,
+                expected_keyword=keyword,
+                expected_event_id=event_id,
+                expected_auth_state_scope=expected_scope,
+                expected_checkpoint_path=checkpoint_path,
+                expected_resource_key=resource_key,
+                require_managed_path=True,
+            )
+            if snapshot is None:
+                return None, snapshot_reason
+        else:
+            snapshot = load_sanitized_search_snapshot(
+                path_value,
+                expected_source=source,
+                expected_keyword=keyword,
+                expected_event_id=event_id,
+                expected_auth_state_scope=expected_scope,
+                expected_record_type=record_type,
+                require_managed_path=True,
+            )
         if snapshot is None:
             return None, "ordinary_chrome_external_session_snapshot_invalid"
         page_number = int(snapshot.get("page_number") or 1)
@@ -12786,6 +13784,14 @@ def validate_ordinary_chrome_external_search_resume(
         seen_pages.add(page_number)
         snapshots.append(snapshot)
     snapshots.sort(key=lambda value: int(value.get("page_number") or 1))
+    if snapshots and literature_batch_export_snapshot_required(source, record_type):
+        first_page = int(snapshots[0].get("page_number") or 1)
+        for offset, snapshot in enumerate(snapshots):
+            if int(snapshot.get("page_number") or 0) != first_page + offset:
+                return None, "ordinary_chrome_batch_export_snapshot_page_sequence_invalid"
+        for snapshot in snapshots[:-1]:
+            if bool(snapshot.get("exhausted")):
+                return None, "ordinary_chrome_batch_export_snapshot_page_sequence_invalid"
     saved, reason = save_ordinary_chrome_external_session(
         config,
         source,
@@ -12935,25 +13941,46 @@ def build_search_challenge_payload(
                 ("no results found", "0 results"),
             )
         )
-    if source == CNKI_SOURCE and search_record_type == "literature":
-        payload["result_detail_enrichment"] = {
-            "schema": "laps_browser_result_detail_enrichment_v1",
-            "mode": "observed_page_metadata_only",
-            "detail_link_selectors": list(
-                WEB_SOURCE_PARSER_PROFILES[CNKI_SOURCE].titles
+    if (
+        source in {CNKI_SOURCE, WANFANG_SOURCE}
+        and search_record_type == "literature"
+    ):
+        batch_profile = LITERATURE_BATCH_EXPORT_PROFILES[source]
+        task_context = SEARCH_TASK_CONTEXT.get()
+        payload["result_batch_export"] = {
+            "schema": "laps_browser_batch_export_request_v1",
+            "snapshot_schema": LITERATURE_BATCH_EXPORT_SNAPSHOT_SCHEMA,
+            "mode": "all_pages_batch_export",
+            "checkpoint_path": first_string(
+                task_context.get("checkpoint_path") or task_context.get("path")
             ),
-            "locator_priority": ["doi", "direct_pdf"],
-            "stop_when_observed": "doi_or_direct_pdf",
-            "doi_must_be_explicit": True,
-            "pdf_must_be_direct_response_or_explicit_direct_link": True,
-            "landing_or_order_url_is_not_pdf": True,
+            "resource_key": first_string(task_context.get("wanfang_resource_key")),
+            "resume_cursor": first_string(task_context.get("cursor_token")),
+            "page_size": batch_profile.max_page_size,
+            "batch_size": source_page_size(
+                int(task_context.get("batch_export_limit") or batch_profile.max_page_size),
+                batch_profile.max_page_size,
+            ),
+            "result_row_selectors": list(batch_profile.result_rows),
+            "clear_action_selectors": list(batch_profile.clear_actions),
+            "row_selection_control_selectors": list(
+                batch_profile.row_selection_controls
+            ),
+            "selected_count_selectors": list(
+                batch_profile.selected_count_selectors
+            ),
+            "export_action_selectors": list(batch_profile.export_actions),
+            "export_host_suffixes": list(batch_profile.export_host_suffixes),
+            "export_path": batch_profile.export_path,
+            "export_entry_selector": batch_profile.export_entry_selector,
+            "export_content_selector": batch_profile.export_content_selector or "",
+            "pagination_required_until_exhausted": True,
+            "selected_before_required": 0,
+            "selected_after_clear_required": 0,
+            "export_count_must_equal_selected_count": True,
+            "cookies_storage_network_capture_forbidden": True,
+            "detail_navigation_forbidden": True,
             "title_based_doi_inference_forbidden": True,
-            "snapshot_embedding": {
-                "doi_class": "doi",
-                "direct_pdf_anchor_class": "direct-pdf",
-            },
-            "production_logout_forbidden": True,
-            "test_logout_requires_explicit_test_mode": True,
         }
     if source == CNKI_SOURCE and search_record_type == "patent":
         payload["result_patent_enrichment"] = {
@@ -14792,7 +15819,8 @@ def accept_ordinary_chrome_external_result(
     source: str,
     control: SearchChallengeControlResult,
 ) -> tuple[bool, str]:
-    task_keyword = first_string(SEARCH_TASK_CONTEXT.get().get("keyword"))
+    task_context = SEARCH_TASK_CONTEXT.get()
+    task_keyword = first_string(task_context.get("keyword"))
     record_type = current_search_record_type()
     policy = (
         patent_source_auth_policy.get(source)
@@ -14819,6 +15847,11 @@ def accept_ordinary_chrome_external_result(
             "event_id": first_string(
                 control.external_session_attestation.get("event_id")
             ),
+            "checkpoint_path": first_string(
+                task_context.get("checkpoint_path") or task_context.get("path")
+            ),
+            "resource_key": first_string(task_context.get("wanfang_resource_key")),
+            "schema": first_string(snapshots[0].get("schema")),
             "snapshots": snapshots,
         }
     )
@@ -17440,6 +18473,8 @@ async def submit_cnki_browser_search(page: Any, keyword: str) -> Any | None:
         90,
         env_seconds("LAPS_CNKI_SEARCH_READY_TIMEOUT_SECONDS", 45, 1),
     )
+    stable_signature = ""
+    stable_since: float | None = None
     while time.monotonic() < deadline:
         try:
             new_pages = [
@@ -17691,6 +18726,1461 @@ async def classify_wanfang_search_readiness(page: Any) -> tuple[str, str]:
     return "pending", body
 
 
+CNKI_LITERATURE_BATCH_CURSOR_PATTERN = re.compile(
+    r"^laps-cnki-batch-page-v1:(\d+)$"
+)
+
+
+def cnki_literature_batch_cursor(page_number: int) -> str:
+    return f"laps-cnki-batch-page-v1:{max(1, int(page_number))}"
+
+
+def parse_cnki_literature_batch_cursor(value: Any) -> int | None:
+    match = CNKI_LITERATURE_BATCH_CURSOR_PATTERN.fullmatch(first_string(value))
+    if not match:
+        return None
+    page_number = int(match.group(1))
+    return page_number if page_number >= 1 else None
+
+
+def literature_batch_raw_result_signature(
+    records: Iterable[LiteratureRecord],
+) -> str:
+    material = [
+        (
+            normalize_literature_batch_title(record.title),
+            unicodedata.normalize("NFKC", first_string(record.raw_id)),
+        )
+        for record in records
+    ]
+    return hashlib.sha256(
+        json.dumps(material, ensure_ascii=False, separators=(",", ":")).encode(
+            "utf-8"
+        )
+    ).hexdigest() if material else ""
+
+
+def literature_batch_persisted_signature(
+    result: LiteratureBatchMatchResult,
+    next_token: str,
+) -> str:
+    return hashlib.sha1(
+        json.dumps(
+            {
+                "matches": list(result.signature_material),
+                "next_token": first_string(next_token),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def wanfang_literature_result_url(
+    value: Any,
+    resource_key: str,
+    page_number: int,
+) -> str:
+    try:
+        parsed = urllib.parse.urlsplit(first_string(value))
+    except ValueError:
+        return ""
+    if not literature_batch_result_url_matches(
+        WANFANG_SOURCE,
+        first_string(value),
+        resource_key,
+    ):
+        return ""
+    query_items = [
+        (key, raw_value)
+        for key, raw_value in urllib.parse.parse_qsl(
+            parsed.query,
+            keep_blank_values=True,
+        )
+        if key.casefold() not in {"p", "s"}
+    ]
+    query_values = [
+        first_string(raw_value)
+        for key, raw_value in query_items
+        if key.casefold() == "q"
+    ]
+    if len(query_values) != 1 or not query_values[0]:
+        return ""
+    query_items.extend((('p', str(max(1, int(page_number)))), ('s', '50')))
+    return urllib.parse.urlunsplit(
+        (
+            "https",
+            "s.wanfangdata.com.cn",
+            f"/{resource_key}",
+            urllib.parse.urlencode(query_items),
+            "",
+        )
+    )
+
+
+def wanfang_literature_resume_page(
+    value: Any,
+    resource_key: str,
+    keyword: str,
+) -> int | None:
+    url = first_string(value)
+    if not literature_batch_result_url_matches(
+        WANFANG_SOURCE,
+        url,
+        resource_key,
+    ):
+        return None
+    try:
+        query = urllib.parse.parse_qs(
+            urllib.parse.urlsplit(url).query,
+            keep_blank_values=True,
+        )
+        if query.get("s") != ["50"] or len(query.get("p", [])) != 1:
+            return None
+        if len(query.get("q", [])) != 1:
+            return None
+        query_value = first_string(query["q"][0])
+        if not acs_search_query_matches(query_value, keyword):
+            return None
+        page_number = int(query["p"][0])
+    except (TypeError, ValueError):
+        return None
+    canonical = wanfang_literature_result_url(url, resource_key, page_number)
+    return page_number if page_number >= 1 and canonical == url else None
+
+
+def literature_batch_fail(
+    runtime: SearchRuntime,
+    source: str,
+    keyword: str,
+    reason: str,
+    detail: str = "",
+) -> None:
+    normalized_reason = first_string(reason) or "literature_batch_export_failed"
+    if detail:
+        normalized_reason = f"{normalized_reason}:{safe_error_text(detail)}"
+    runtime.mark_current_run(
+        "literature",
+        source,
+        keyword,
+        "incomplete",
+        normalized_reason,
+    )
+    runtime.skip(source, keyword, normalized_reason)
+
+
+async def literature_batch_result_rows(page: Any, source: str) -> Any:
+    profile = LITERATURE_BATCH_EXPORT_PROFILES[source]
+    return page.locator(", ".join(profile.result_rows))
+
+
+async def literature_batch_row_controls(page: Any, source: str) -> list[Any]:
+    profile = LITERATURE_BATCH_EXPORT_PROFILES[source]
+    rows = await literature_batch_result_rows(page, source)
+    controls: list[Any] = []
+    for index in range(await rows.count()):
+        row = rows.nth(index)
+        candidates = row.locator(", ".join(profile.row_selection_controls))
+        if await candidates.count() != 1:
+            raise LiteratureBatchExportError(
+                "literature_batch_selection_control_count_mismatch",
+                f"row={index + 1};controls={await candidates.count()}",
+            )
+        controls.append(candidates.first)
+    return controls
+
+
+async def literature_batch_selected_count(page: Any, source: str) -> int | None:
+    body = await page_body_text(page)
+    pattern = (
+        r"已选\s*[（(]?\s*(\d+)"
+        if source == CNKI_SOURCE
+        else r"已选择\s*(\d+)\s*条"
+    )
+    observed = {int(value) for value in re.findall(pattern, body)}
+    if len(observed) == 1:
+        return next(iter(observed))
+    return None
+
+
+async def wait_for_literature_batch_selected_count(
+    page: Any,
+    source: str,
+    expected: int,
+    timeout_seconds: int = 15,
+) -> bool:
+    deadline = time.monotonic() + max(1, timeout_seconds)
+    while time.monotonic() < deadline:
+        if await literature_batch_selected_count(page, source) == expected:
+            return True
+        try:
+            await page.wait_for_timeout(250)
+        except Exception:
+            break
+    return False
+
+
+async def clear_literature_batch_selection(page: Any, source: str) -> None:
+    profile = LITERATURE_BATCH_EXPORT_PROFILES[source]
+    selected_count = await literature_batch_selected_count(page, source)
+    if selected_count is None:
+        raise LiteratureBatchExportError(
+            "literature_batch_selected_count_unobservable"
+        )
+    if selected_count:
+        clear_clicked = await click_first_visible_async(page, profile.clear_actions)
+        cleared = clear_clicked and await wait_for_literature_batch_selected_count(
+            page,
+            source,
+            0,
+            timeout_seconds=3,
+        )
+        if not cleared:
+            # A verification overlay can hide the clear control after an
+            # export attempt. Current-page controls still retain their native
+            # selection handlers, so release them individually as a cleanup
+            # fallback. Cross-page stale selections still fail closed because
+            # the observed counter will remain non-zero.
+            for control in await literature_batch_row_controls(page, source):
+                try:
+                    if await control.is_checked(timeout=500):
+                        await control.evaluate("node => node.click()")
+                except Exception:
+                    continue
+            if not await wait_for_literature_batch_selected_count(page, source, 0):
+                reason = (
+                    "literature_batch_clear_count_not_zero"
+                    if clear_clicked
+                    else "literature_batch_clear_action_unavailable"
+                )
+                raise LiteratureBatchExportError(
+                    reason,
+                    f"selected={selected_count}",
+                )
+    controls = await literature_batch_row_controls(page, source)
+    for index, control in enumerate(controls, start=1):
+        try:
+            if await control.is_checked(timeout=500):
+                raise LiteratureBatchExportError(
+                    "literature_batch_row_still_selected",
+                    f"row={index}",
+                )
+        except LiteratureBatchExportError:
+            raise
+        except Exception as exc:
+            raise LiteratureBatchExportError(
+                "literature_batch_selection_state_unobservable",
+                f"row={index};error={exc.__class__.__name__}",
+            ) from exc
+    if await literature_batch_selected_count(page, source) != 0:
+        raise LiteratureBatchExportError(
+            "literature_batch_clear_count_not_zero"
+        )
+
+
+async def select_literature_batch_controls(
+    page: Any,
+    source: str,
+    controls: list[Any],
+) -> None:
+    for index, control in enumerate(controls, start=1):
+        try:
+            if not await control.is_checked(timeout=500):
+                await control.check(force=True, timeout=3000)
+        except Exception as exc:
+            raise LiteratureBatchExportError(
+                "literature_batch_row_selection_failed",
+                f"batch_row={index};error={exc.__class__.__name__}",
+            ) from exc
+    if not await wait_for_literature_batch_selected_count(
+        page,
+        source,
+        len(controls),
+    ):
+        observed = await literature_batch_selected_count(page, source)
+        raise LiteratureBatchExportError(
+            "literature_batch_selected_count_mismatch",
+            f"expected={len(controls)};observed={observed}",
+        )
+    for index, control in enumerate(controls, start=1):
+        try:
+            if not await control.is_checked(timeout=500):
+                raise LiteratureBatchExportError(
+                    "literature_batch_row_selection_not_confirmed",
+                    f"batch_row={index}",
+                )
+        except LiteratureBatchExportError:
+            raise
+        except Exception as exc:
+            raise LiteratureBatchExportError(
+                "literature_batch_selection_state_unobservable",
+                f"batch_row={index};error={exc.__class__.__name__}",
+            ) from exc
+
+
+async def open_literature_batch_export_page(
+    page: Any,
+    context: Any,
+    source: str,
+) -> Any:
+    profile = LITERATURE_BATCH_EXPORT_PROFILES[source]
+    known_page_ids = {
+        id(candidate)
+        for candidate in context.pages
+        if not candidate.is_closed()
+    }
+    if source == CNKI_SOURCE:
+        # The visible "导出与分析" control only opens a two-level menu. The
+        # actual export POST is bound to its citation-format items, which remain
+        # hidden until hovered. Dispatch the observed GB/T item directly so the
+        # operation is deterministic in headed and headless browsers alike.
+        export_actions = page.locator(", ".join(profile.export_actions))
+        if await export_actions.count() != 1:
+            raise LiteratureBatchExportError(
+                "literature_batch_export_action_unavailable"
+            )
+        try:
+            await export_actions.first.evaluate("node => node.click()")
+        except Exception as exc:
+            raise LiteratureBatchExportError(
+                "literature_batch_export_action_unavailable",
+                exc.__class__.__name__,
+            ) from exc
+    elif not await click_first_visible_async(page, profile.export_actions):
+        raise LiteratureBatchExportError(
+            "literature_batch_export_action_unavailable"
+        )
+    deadline = time.monotonic() + min(
+        60,
+        env_seconds("LAPS_LITERATURE_BATCH_EXPORT_TIMEOUT_SECONDS", 30, 1),
+    )
+    while time.monotonic() < deadline:
+        for candidate in reversed(context.pages):
+            if candidate.is_closed() or id(candidate) in known_page_ids:
+                continue
+            candidate_url = first_string(getattr(candidate, "url", ""))
+            if literature_batch_export_url_matches(source, candidate_url):
+                try:
+                    await candidate.wait_for_load_state(
+                        "domcontentloaded",
+                        timeout=15000,
+                    )
+                except Exception:
+                    pass
+                for extra_page in context.pages:
+                    if (
+                        extra_page is not candidate
+                        and id(extra_page) not in known_page_ids
+                        and not extra_page.is_closed()
+                    ):
+                        try:
+                            await extra_page.close()
+                        except Exception:
+                            pass
+                return candidate
+        try:
+            await page.wait_for_timeout(250)
+        except Exception:
+            break
+    for candidate in context.pages:
+        if id(candidate) not in known_page_ids and not candidate.is_closed():
+            try:
+                await candidate.close()
+            except Exception:
+                pass
+    raise LiteratureBatchExportError(
+        "literature_batch_export_page_not_observed"
+    )
+
+
+async def collect_literature_batch_export(
+    page: Any,
+    context: Any,
+    source: str,
+    expected_count: int,
+) -> tuple[LiteratureBatchExportEntry, ...]:
+    profile = LITERATURE_BATCH_EXPORT_PROFILES[source]
+    export_page = None
+    try:
+        export_page = await open_literature_batch_export_page(
+            page,
+            context,
+            source,
+        )
+        export_url = first_string(getattr(export_page, "url", ""))
+        if not literature_batch_export_url_matches(source, export_url):
+            raise LiteratureBatchExportError(
+                "literature_batch_export_url_invalid",
+                sanitize_url_for_search_hook(export_url),
+            )
+        try:
+            await export_page.wait_for_selector(
+                profile.export_entry_selector,
+                timeout=min(
+                    60,
+                    env_seconds(
+                        "LAPS_LITERATURE_BATCH_EXPORT_TIMEOUT_SECONDS",
+                        30,
+                        1,
+                    ),
+                )
+                * 1000,
+            )
+        except Exception as exc:
+            raise LiteratureBatchExportError(
+                "literature_batch_export_entries_not_ready",
+                exc.__class__.__name__,
+            ) from exc
+        export_html = await export_page.content()
+        entries = (
+            parse_cnki_batch_export(export_html)
+            if source == CNKI_SOURCE
+            else parse_wanfang_batch_export(export_html)
+        )
+        if len(entries) != expected_count:
+            raise LiteratureBatchExportError(
+                "literature_batch_export_count_mismatch",
+                f"selected={expected_count};entries={len(entries)}",
+            )
+        return entries
+    finally:
+        if export_page is not None and not export_page.is_closed():
+            try:
+                await export_page.close()
+            except Exception:
+                pass
+
+
+async def literature_batch_page_records(
+    page: Any,
+    source: str,
+    keyword: str,
+    rank_start: int,
+) -> tuple[list[LiteratureRecord], str, int]:
+    parser = WEB_SOURCE_HTML_PARSERS[source]
+    html_text = await page.content()
+    base_url = first_string(getattr(page, "url", ""))
+    page_records = parser(
+        html_text,
+        base_url,
+        source,
+        keyword,
+        rank_start,
+    )
+    rows = await literature_batch_result_rows(page, source)
+    row_count = await rows.count()
+    if len(page_records) != row_count:
+        raise LiteratureBatchExportError(
+            "literature_batch_result_card_count_mismatch",
+            f"rows={row_count};records={len(page_records)}",
+        )
+    signature = literature_batch_raw_result_signature(page_records)
+    if row_count and not signature:
+        raise LiteratureBatchExportError(
+            "literature_batch_result_signature_missing"
+        )
+    return page_records, signature, row_count
+
+
+async def cnki_literature_page_numbers(page: Any) -> tuple[int | None, int | None]:
+    candidates: list[str] = []
+    for selector in (".countPageMark", ".pagerTitleCell", ".pages"):
+        try:
+            candidates.extend(await page.locator(selector).all_inner_texts())
+        except Exception:
+            continue
+    for value in candidates:
+        match = re.search(r"(?<!\d)(\d+)\s*/\s*(\d+)(?!\d)", first_string(value))
+        if not match:
+            continue
+        current, total = int(match.group(1)), int(match.group(2))
+        if 1 <= current <= total:
+            return current, total
+    return None, None
+
+
+async def literature_batch_next_control(page: Any, source: str) -> Any | None:
+    selectors = (
+        ("a#PageNext", "a[aria-label='下一页']", "a:has-text('下一页')")
+        if source == CNKI_SOURCE
+        else (
+            ".bottom-pagination .next",
+            ".pagination .next",
+            ".pagination_page:not(.disabled):has-text('下一页')",
+            "a[rel='next']",
+        )
+    )
+    for selector in selectors:
+        try:
+            locators = page.locator(selector)
+            for index in range(await locators.count()):
+                locator = locators.nth(index)
+                if not await locator.is_visible(timeout=500):
+                    continue
+                classes = first_string(await locator.get_attribute("class")).casefold()
+                disabled = await locator.get_attribute("disabled")
+                aria_disabled = first_string(
+                    await locator.get_attribute("aria-disabled")
+                ).casefold()
+                if disabled is not None or aria_disabled == "true" or "disabled" in classes:
+                    continue
+                return locator
+        except Exception:
+            continue
+    return None
+
+
+async def wait_for_literature_batch_result_change(
+    page: Any,
+    source: str,
+    keyword: str,
+    previous_signature: str,
+    expected_page: int,
+) -> bool:
+    deadline = time.monotonic() + min(
+        90,
+        env_seconds("LAPS_LITERATURE_BATCH_PAGE_ADVANCE_TIMEOUT_SECONDS", 45, 1),
+    )
+    stable_signature = ""
+    stable_since: float | None = None
+    while time.monotonic() < deadline:
+        readiness, _ = (
+            await classify_cnki_search_readiness(page)
+            if source == CNKI_SOURCE
+            else await classify_wanfang_search_readiness(page)
+        )
+        if readiness == "records":
+            try:
+                records, signature, _ = await literature_batch_page_records(
+                    page,
+                    source,
+                    keyword,
+                    max(0, (expected_page - 1) * 50),
+                )
+            except LiteratureBatchExportError:
+                records, signature = [], ""
+            if records and signature and signature != previous_signature:
+                if source == CNKI_SOURCE:
+                    current, _ = await cnki_literature_page_numbers(page)
+                    if current != expected_page:
+                        await page.wait_for_timeout(250)
+                        continue
+                    return True
+                if signature == stable_signature:
+                    if stable_since is not None and time.monotonic() - stable_since >= 1:
+                        return True
+                else:
+                    stable_signature = signature
+                    stable_since = time.monotonic()
+        try:
+            await page.wait_for_timeout(500)
+        except Exception:
+            break
+    return False
+
+
+async def set_cnki_literature_page_size(page: Any) -> bool:
+    option_selector = "#perPageDiv li[data-val='50']"
+    try:
+        current_size = first_string(
+            await page.locator("#perPageDiv .sort-default > span").first.inner_text(
+                timeout=3000
+            )
+        ).strip()
+        if current_size != "50":
+            container = page.locator("#perPageDiv").first
+            if not await container.count():
+                return False
+            # CNKI installs the delegated option handler when the closed menu is
+            # first opened. Clicking the hidden option before that silently does
+            # nothing, so open the menu atomically before choosing 50.
+            await container.evaluate("node => node.click()")
+            option = page.locator(option_selector).first
+            if not await option.count():
+                return False
+            await option.evaluate("node => node.click()")
+        deadline = time.monotonic() + 30
+        stable_signature = ""
+        stable_since: float | None = None
+        while time.monotonic() < deadline:
+            if await cnki_active_verification_challenge(page):
+                return False
+            try:
+                _, signature, row_count = await literature_batch_page_records(
+                    page,
+                    CNKI_SOURCE,
+                    "",
+                    0,
+                )
+            except LiteratureBatchExportError:
+                signature, row_count = "", 0
+            if 0 < row_count <= 50 and signature:
+                if signature == stable_signature:
+                    if stable_since is not None and time.monotonic() - stable_since >= 1:
+                        has_next = (
+                            await literature_batch_next_control(page, CNKI_SOURCE)
+                            is not None
+                        )
+                        if not has_next or row_count == 50:
+                            return True
+                else:
+                    stable_signature = signature
+                    stable_since = time.monotonic()
+            await page.wait_for_timeout(250)
+    except Exception:
+        return False
+    return False
+
+
+async def advance_cnki_literature_page(
+    page: Any,
+    keyword: str,
+    previous_signature: str,
+    expected_page: int,
+) -> bool:
+    next_control = await literature_batch_next_control(page, CNKI_SOURCE)
+    if next_control is None:
+        return False
+    try:
+        await next_control.click(timeout=5000)
+    except Exception:
+        return False
+    return await wait_for_literature_batch_result_change(
+        page,
+        CNKI_SOURCE,
+        keyword,
+        previous_signature,
+        expected_page,
+    )
+
+
+async def consume_literature_batch_export_snapshots(
+    runtime: SearchRuntime,
+    source: str,
+    keyword: str,
+    query_url: str,
+    requested_page_size: int,
+    external_resume: dict[str, Any],
+) -> list[LiteratureRecord]:
+    task_context = SEARCH_TASK_CONTEXT.get()
+    checkpoint_path = first_string(
+        task_context.get("checkpoint_path") or task_context.get("path")
+    )
+    resource_key = first_string(task_context.get("wanfang_resource_key"))
+    snapshots = external_resume.get("snapshots")
+    if (
+        first_string(external_resume.get("schema"))
+        != LITERATURE_BATCH_EXPORT_SNAPSHOT_SCHEMA
+    ):
+        literature_batch_fail(
+            runtime,
+            source,
+            keyword,
+            "ordinary_chrome_batch_export_snapshot_required",
+        )
+        return []
+    if (
+        first_string(external_resume.get("source")) != source
+        or first_string(external_resume.get("keyword")) != keyword
+        or first_string(external_resume.get("record_type")) != "literature"
+        or first_string(external_resume.get("checkpoint_path")) != checkpoint_path
+        or first_string(external_resume.get("resource_key")) != resource_key
+        or not isinstance(snapshots, list)
+        or not snapshots
+    ):
+        literature_batch_fail(
+            runtime,
+            source,
+            keyword,
+            "ordinary_chrome_batch_export_snapshot_scope_mismatch",
+        )
+        return []
+    run = runtime.resume_run("literature", source, keyword)
+    completed_pages = int(run.get("pages") or 0)
+    raw_rank_start = int(run.get("fetched") or 0)
+    batch_limit = source_page_size(requested_page_size, 50)
+    accepted_records: list[LiteratureRecord] = []
+    seen_content_signatures: set[str] = set()
+    for offset, snapshot in enumerate(snapshots, start=1):
+        page_number = int(snapshot.get("page_number") or 0)
+        if page_number != completed_pages + offset:
+            literature_batch_fail(
+                runtime,
+                source,
+                keyword,
+                "ordinary_chrome_batch_export_snapshot_page_sequence_invalid",
+            )
+            return accepted_records
+        exports = snapshot.get("exports") or []
+        if any(
+            int(export.get("selected_count") or 0) > batch_limit
+            for export in exports
+            if isinstance(export, dict)
+        ):
+            literature_batch_fail(
+                runtime,
+                source,
+                keyword,
+                "ordinary_chrome_batch_export_snapshot_batch_limit_exceeded",
+            )
+            return accepted_records
+        html_text = first_string(snapshot.get("html"))
+        parse_base_url = first_string(snapshot.get("final_url")) or query_url
+        page_records = WEB_SOURCE_HTML_PARSERS[source](
+            html_text,
+            parse_base_url,
+            source,
+            keyword,
+            raw_rank_start,
+        )
+        result_count = int(snapshot.get("result_count") or 0)
+        if len(page_records) != result_count:
+            literature_batch_fail(
+                runtime,
+                source,
+                keyword,
+                "ordinary_chrome_batch_export_snapshot_parser_count_mismatch",
+                f"results={result_count};records={len(page_records)}",
+            )
+            return accepted_records
+        export_entries: list[LiteratureBatchExportEntry] = []
+        try:
+            for export in exports:
+                export_html = first_string(export.get("export_html"))
+                parsed_entries = (
+                    parse_cnki_batch_export(export_html)
+                    if source == CNKI_SOURCE
+                    else parse_wanfang_batch_export(export_html)
+                )
+                if len(parsed_entries) != int(export.get("export_count") or 0):
+                    raise LiteratureBatchExportError(
+                        "literature_batch_export_count_mismatch"
+                    )
+                export_entries.extend(parsed_entries)
+            match_result = match_batch_export_entries(
+                page_records,
+                export_entries,
+            )
+        except LiteratureBatchExportError as exc:
+            literature_batch_fail(
+                runtime,
+                source,
+                keyword,
+                exc.reason,
+                exc.detail,
+            )
+            return accepted_records
+        exhausted = bool(snapshot.get("exhausted"))
+        next_page_number = snapshot.get("next_page_number")
+        if exhausted:
+            next_token = ""
+        elif source == CNKI_SOURCE:
+            next_token = cnki_literature_batch_cursor(int(next_page_number))
+        else:
+            next_token = first_string(snapshot.get("next_url"))
+        page_signature = literature_batch_persisted_signature(
+            match_result,
+            next_token,
+        )
+        content_signature = hashlib.sha256(
+            json.dumps(
+                list(match_result.signature_material),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        if content_signature in seen_content_signatures:
+            literature_batch_fail(
+                runtime,
+                source,
+                keyword,
+                "literature_batch_repeated_page_signature",
+            )
+            return accepted_records
+        seen_content_signatures.add(content_signature)
+        persist_search_page(
+            runtime,
+            "literature",
+            source,
+            keyword,
+            list(match_result.records),
+            next_token=next_token,
+            exhausted=exhausted,
+            page_number=page_number,
+            raw_count=match_result.raw_count,
+            page_signature=page_signature,
+        )
+        accepted_records.extend(match_result.records)
+        raw_rank_start += match_result.raw_count
+    if not bool(snapshots[-1].get("exhausted")):
+        literature_batch_fail(
+            runtime,
+            source,
+            keyword,
+            "ordinary_chrome_batch_export_snapshot_not_exhausted",
+        )
+    else:
+        runtime.restricted_auth(
+            source,
+            keyword,
+            runtime.config.path,
+            "success",
+            f"ordinary_chrome_batch_export_parsed:{len(accepted_records)} records",
+        )
+    return accepted_records
+
+
+async def wait_for_wanfang_literature_batch_readiness(
+    page: Any,
+    keyword: str,
+    rank_start: int = 0,
+) -> tuple[str, str]:
+    deadline = time.monotonic() + min(
+        90,
+        env_seconds("LAPS_WANFANG_SEARCH_READY_TIMEOUT_SECONDS", 45, 1),
+    )
+    stable_signature = ""
+    stable_since: float | None = None
+    body = ""
+    while time.monotonic() < deadline:
+        readiness, body = await classify_wanfang_search_readiness(page)
+        if readiness == "explicit_no_results":
+            return readiness, body
+        if readiness in {"challenge", "navigation_error", "institution_login"}:
+            return readiness, body
+        if readiness == "records":
+            try:
+                _, signature, row_count = await literature_batch_page_records(
+                    page,
+                    WANFANG_SOURCE,
+                    keyword,
+                    rank_start,
+                )
+            except LiteratureBatchExportError:
+                signature, row_count = "", 0
+            if signature and row_count:
+                if signature == stable_signature:
+                    if stable_since is not None and time.monotonic() - stable_since >= 1:
+                        return readiness, body
+                else:
+                    stable_signature = signature
+                    stable_since = time.monotonic()
+        try:
+            await page.wait_for_timeout(250)
+        except Exception:
+            break
+    return "pending", body
+
+
+async def navigate_literature_batch_search_start(
+    runtime: SearchRuntime,
+    source: str,
+    keyword: str,
+    browser_type: Any,
+    browser: Any,
+    context: Any,
+    query_url: str,
+    resume_url: str,
+) -> tuple[Any, Any, Any, str]:
+    page = await browser_context_navigation_page(context)
+    target_url = resume_url if source == WANFANG_SOURCE and resume_url else query_url
+    await wait_for_rate_limiter(
+        runtime.limiter,
+        urllib.parse.urlparse(target_url).netloc,
+        kind="browser",
+        source=source,
+    )
+    try:
+        response = await page.goto(
+            target_url,
+            wait_until="domcontentloaded",
+            timeout=30000,
+        )
+    except Exception as exc:
+        if exc.__class__.__name__ != "TimeoutError":
+            raise
+        response = None
+    await dismiss_browser_cookie_banners(page)
+    body = await page_body_text(page)
+    response_status = int(response.status) if response is not None else 0
+    for _ in range(2):
+        login_required = bool(
+            source == WANFANG_SOURCE and await wanfang_login_surface_visible(page)
+        )
+        if (
+            SEARCH_TASK_CONTEXT.get().get("path") == "restricted_browser"
+            and (
+                login_required
+                or restricted_search_authorization_needed(
+                    body,
+                    first_string(getattr(page, "url", "")),
+                )
+            )
+        ):
+            recovered, browser, context, page, body, response_status = (
+                await recover_restricted_search_authorization(
+                    runtime,
+                    source,
+                    keyword,
+                    browser_type,
+                    browser,
+                    context,
+                    page,
+                    target_url,
+                    body,
+                )
+            )
+            if not recovered:
+                return browser, context, page, "authorization_failed"
+            continue
+        if await web_page_needs_verification_control(
+            source,
+            page,
+            response_status,
+            body,
+        ):
+            resolved, browser, context, page = await handle_search_verification_challenge(
+                runtime,
+                source,
+                keyword,
+                browser_type,
+                browser,
+                context,
+                page,
+                first_string(getattr(page, "url", "")) or target_url,
+                body,
+                {},
+            )
+            if not resolved:
+                return browser, context, page, "challenge_unresolved"
+            if isinstance(EXTERNAL_BROWSER_SEARCH_RESUME.get(), dict):
+                return browser, context, page, "external_snapshot"
+            if SEARCH_CHALLENGE_SNAPSHOT.get() is not None:
+                return browser, context, page, "legacy_snapshot_rejected"
+            body = await page_body_text(page)
+            response_status = 0
+            continue
+        break
+    if response_status >= 400:
+        return browser, context, page, f"web_http_{response_status}"
+    if source == CNKI_SOURCE and cnki_home_search_surface(
+        first_string(getattr(page, "url", ""))
+    ):
+        result_page = await submit_cnki_browser_search(page, keyword)
+        if result_page is None:
+            return browser, context, page, "cnki_search_form_not_ready"
+        page = result_page
+    if source == WANFANG_SOURCE and wanfang_resource_search_surface(
+        first_string(getattr(page, "url", ""))
+    ):
+        result_page = await submit_wanfang_browser_search(page, keyword)
+        if result_page is None:
+            return browser, context, page, "wanfang_search_form_not_ready"
+        page = result_page
+    readiness, body = (
+        await classify_cnki_search_readiness(page)
+        if source == CNKI_SOURCE
+        else await wait_for_wanfang_literature_batch_readiness(page, keyword)
+    )
+    if readiness == "institution_login":
+        if SEARCH_TASK_CONTEXT.get().get("path") != "restricted_browser":
+            return browser, context, page, "wanfang_institution_login_required"
+        recovered, browser, context, page, body, _ = (
+            await recover_restricted_search_authorization(
+                runtime,
+                source,
+                keyword,
+                browser_type,
+                browser,
+                context,
+                page,
+                target_url,
+                body,
+            )
+        )
+        if not recovered:
+            return browser, context, page, "authorization_failed"
+        result_page = await submit_wanfang_browser_search(page, keyword)
+        if result_page is None:
+            return browser, context, page, "wanfang_search_form_not_ready_after_auth"
+        page = result_page
+        readiness, body = await wait_for_wanfang_literature_batch_readiness(
+            page,
+            keyword,
+        )
+    if readiness in {"challenge", "navigation_error"}:
+        resolved, browser, context, page = await handle_search_verification_challenge(
+            runtime,
+            source,
+            keyword,
+            browser_type,
+            browser,
+            context,
+            page,
+            first_string(getattr(page, "url", "")) or target_url,
+            body,
+            {},
+        )
+        if not resolved:
+            return browser, context, page, "challenge_unresolved"
+        if isinstance(EXTERNAL_BROWSER_SEARCH_RESUME.get(), dict):
+            return browser, context, page, "external_snapshot"
+        if SEARCH_CHALLENGE_SNAPSHOT.get() is not None:
+            return browser, context, page, "legacy_snapshot_rejected"
+        readiness, _ = (
+            await classify_cnki_search_readiness(page)
+            if source == CNKI_SOURCE
+            else await wait_for_wanfang_literature_batch_readiness(page, keyword)
+        )
+    if readiness not in {"records", "explicit_no_results"}:
+        return browser, context, page, f"{safe_slug(source)}_search_results_not_ready"
+    return browser, context, page, readiness
+
+
+async def search_literature_batch_export_pages(
+    runtime: SearchRuntime,
+    source: str,
+    keyword: str,
+    browser_type: Any,
+    browser: Any,
+    context: Any,
+    query_url: str,
+    requested_page_size: int,
+) -> tuple[list[LiteratureRecord], Any, Any]:
+    batch_limit = source_page_size(requested_page_size, 50)
+    task_context = SEARCH_TASK_CONTEXT.get()
+    task_context["batch_export_limit"] = batch_limit
+    external_resume = EXTERNAL_BROWSER_SEARCH_RESUME.get()
+    if isinstance(external_resume, dict):
+        EXTERNAL_BROWSER_SEARCH_RESUME.set(None)
+        records = await consume_literature_batch_export_snapshots(
+            runtime,
+            source,
+            keyword,
+            query_url,
+            requested_page_size,
+            external_resume,
+        )
+        return records, browser, context
+
+    run = runtime.resume_run("literature", source, keyword)
+    completed_pages = int(run.get("pages") or 0)
+    raw_rank_start = int(run.get("fetched") or 0)
+    cursor = first_string(run.get("next_token"))
+    task_context["cursor_token"] = cursor
+    resource_key = first_string(task_context.get("wanfang_resource_key"))
+    if source == CNKI_SOURCE:
+        target_page = (
+            parse_cnki_literature_batch_cursor(cursor)
+            if completed_pages
+            else 1
+        )
+        if target_page is None or target_page != completed_pages + 1:
+            literature_batch_fail(
+                runtime,
+                source,
+                keyword,
+                "cnki_batch_resume_cursor_unsupported",
+            )
+            return [], browser, context
+        resume_url = ""
+    else:
+        if resource_key not in {key for key, _, _ in WANFANG_RESOURCE_PATHS}:
+            literature_batch_fail(
+                runtime,
+                source,
+                keyword,
+                "wanfang_batch_resource_key_missing",
+            )
+            return [], browser, context
+        if completed_pages:
+            target_page = wanfang_literature_resume_page(
+                cursor,
+                resource_key,
+                keyword,
+            )
+            if target_page is None or target_page != completed_pages + 1:
+                literature_batch_fail(
+                    runtime,
+                    source,
+                    keyword,
+                    "wanfang_batch_resume_cursor_unsupported",
+                )
+                return [], browser, context
+            resume_url = cursor
+        else:
+            target_page = 1
+            resume_url = ""
+    browser, context, page, readiness = await navigate_literature_batch_search_start(
+        runtime,
+        source,
+        keyword,
+        browser_type,
+        browser,
+        context,
+        query_url,
+        resume_url,
+    )
+    if readiness == "external_snapshot":
+        external_resume = EXTERNAL_BROWSER_SEARCH_RESUME.get()
+        if not isinstance(external_resume, dict):
+            literature_batch_fail(
+                runtime,
+                source,
+                keyword,
+                "ordinary_chrome_batch_export_snapshot_required",
+            )
+            return [], browser, context
+        EXTERNAL_BROWSER_SEARCH_RESUME.set(None)
+        records = await consume_literature_batch_export_snapshots(
+            runtime,
+            source,
+            keyword,
+            query_url,
+            requested_page_size,
+            external_resume,
+        )
+        return records, browser, context
+    if readiness == "legacy_snapshot_rejected":
+        literature_batch_fail(
+            runtime,
+            source,
+            keyword,
+            "ordinary_chrome_batch_export_snapshot_required",
+        )
+        return [], browser, context
+    if readiness not in {"records", "explicit_no_results"}:
+        literature_batch_fail(runtime, source, keyword, readiness)
+        return [], browser, context
+    if source == CNKI_SOURCE and readiness == "records":
+        if not await set_cnki_literature_page_size(page):
+            literature_batch_fail(
+                runtime,
+                source,
+                keyword,
+                "cnki_batch_page_size_50_not_confirmed",
+            )
+            return [], browser, context
+        try:
+            _, replay_signature, _ = await literature_batch_page_records(
+                page,
+                source,
+                keyword,
+                0,
+            )
+        except LiteratureBatchExportError as exc:
+            literature_batch_fail(runtime, source, keyword, exc.reason, exc.detail)
+            return [], browser, context
+        current_number, _ = await cnki_literature_page_numbers(page)
+        if current_number != 1:
+            literature_batch_fail(
+                runtime,
+                source,
+                keyword,
+                "cnki_batch_initial_page_number_invalid",
+            )
+            return [], browser, context
+        for logical_page in range(2, target_page + 1):
+            if not await advance_cnki_literature_page(
+                page,
+                keyword,
+                replay_signature,
+                logical_page,
+            ):
+                literature_batch_fail(
+                    runtime,
+                    source,
+                    keyword,
+                    "cnki_batch_resume_replay_failed",
+                    f"target_page={logical_page}",
+                )
+                return [], browser, context
+            try:
+                _, replay_signature, _ = await literature_batch_page_records(
+                    page,
+                    source,
+                    keyword,
+                    (logical_page - 1) * 50,
+                )
+            except LiteratureBatchExportError as exc:
+                literature_batch_fail(runtime, source, keyword, exc.reason, exc.detail)
+                return [], browser, context
+    elif source == WANFANG_SOURCE and readiness == "records":
+        canonical_url = wanfang_literature_result_url(
+            first_string(getattr(page, "url", "")),
+            resource_key,
+            target_page,
+        )
+        if not canonical_url:
+            literature_batch_fail(
+                runtime,
+                source,
+                keyword,
+                "wanfang_batch_result_url_invalid",
+            )
+            return [], browser, context
+        if first_string(getattr(page, "url", "")) != canonical_url:
+            try:
+                await page.goto(
+                    canonical_url,
+                    wait_until="domcontentloaded",
+                    timeout=30000,
+                )
+            except Exception as exc:
+                literature_batch_fail(
+                    runtime,
+                    source,
+                    keyword,
+                    "wanfang_batch_page_size_50_navigation_failed",
+                    exc.__class__.__name__,
+                )
+                return [], browser, context
+            readiness, _ = await wait_for_wanfang_literature_batch_readiness(
+                page,
+                keyword,
+                raw_rank_start,
+            )
+            if readiness != "records":
+                literature_batch_fail(
+                    runtime,
+                    source,
+                    keyword,
+                    "wanfang_batch_page_size_50_not_confirmed",
+                )
+                return [], browser, context
+
+    accepted_records: list[LiteratureRecord] = []
+    seen_raw_signatures: set[str] = set()
+    logical_page = target_page
+    while True:
+        readiness, body = (
+            await classify_cnki_search_readiness(page)
+            if source == CNKI_SOURCE
+            else await classify_wanfang_search_readiness(page)
+        )
+        if readiness == "explicit_no_results":
+            if completed_pages or logical_page != 1:
+                literature_batch_fail(
+                    runtime,
+                    source,
+                    keyword,
+                    "literature_batch_results_changed_during_resume",
+                )
+                return accepted_records, browser, context
+            try:
+                await clear_literature_batch_selection(page, source)
+            except LiteratureBatchExportError as exc:
+                literature_batch_fail(runtime, source, keyword, exc.reason, exc.detail)
+                return accepted_records, browser, context
+            empty_result = match_batch_export_entries((), ())
+            persist_search_page(
+                runtime,
+                "literature",
+                source,
+                keyword,
+                [],
+                next_token="",
+                exhausted=True,
+                page_number=logical_page,
+                raw_count=0,
+                page_signature=literature_batch_persisted_signature(
+                    empty_result,
+                    "",
+                ),
+            )
+            break
+        if readiness != "records":
+            literature_batch_fail(
+                runtime,
+                source,
+                keyword,
+                "literature_batch_result_page_not_ready",
+                readiness,
+            )
+            return accepted_records, browser, context
+        try:
+            page_records, raw_signature, row_count = await literature_batch_page_records(
+                page,
+                source,
+                keyword,
+                raw_rank_start,
+            )
+            if raw_signature in seen_raw_signatures:
+                raise LiteratureBatchExportError(
+                    "literature_batch_repeated_page_signature"
+                )
+            seen_raw_signatures.add(raw_signature)
+            if source == CNKI_SOURCE:
+                observed_page, total_pages = await cnki_literature_page_numbers(page)
+                if observed_page is None or total_pages is None:
+                    raise LiteratureBatchExportError(
+                        "cnki_batch_page_indicator_unobservable"
+                    )
+                if observed_page != logical_page:
+                    raise LiteratureBatchExportError(
+                        "cnki_batch_page_number_mismatch",
+                        f"expected={logical_page};observed={observed_page}",
+                    )
+            else:
+                observed_page = wanfang_literature_resume_page(
+                    first_string(getattr(page, "url", "")),
+                    resource_key,
+                    keyword,
+                )
+                total_pages = None
+                if observed_page != logical_page:
+                    raise LiteratureBatchExportError(
+                        "wanfang_batch_page_number_mismatch",
+                        f"expected={logical_page};observed={observed_page}",
+                    )
+            await clear_literature_batch_selection(page, source)
+            _, stable_signature, stable_count = await literature_batch_page_records(
+                page,
+                source,
+                keyword,
+                raw_rank_start,
+            )
+            if stable_signature != raw_signature or stable_count != row_count:
+                raise LiteratureBatchExportError(
+                    "literature_batch_result_page_changed_during_clear"
+                )
+            controls = await literature_batch_row_controls(page, source)
+            if len(controls) != row_count:
+                raise LiteratureBatchExportError(
+                    "literature_batch_selection_control_count_mismatch",
+                    f"rows={row_count};controls={len(controls)}",
+                )
+            export_entries: list[LiteratureBatchExportEntry] = []
+            for start in range(0, row_count, batch_limit):
+                selected_controls = controls[start : start + batch_limit]
+                try:
+                    await select_literature_batch_controls(
+                        page,
+                        source,
+                        selected_controls,
+                    )
+                    export_entries.extend(
+                        await collect_literature_batch_export(
+                            page,
+                            context,
+                            source,
+                            len(selected_controls),
+                        )
+                    )
+                finally:
+                    await clear_literature_batch_selection(page, source)
+                _, after_signature, after_count = await literature_batch_page_records(
+                    page,
+                    source,
+                    keyword,
+                    raw_rank_start,
+                )
+                if after_signature != raw_signature or after_count != row_count:
+                    raise LiteratureBatchExportError(
+                        "literature_batch_result_page_changed_during_export"
+                    )
+            match_result = match_batch_export_entries(
+                page_records,
+                export_entries,
+            )
+            next_control = await literature_batch_next_control(page, source)
+            has_next = next_control is not None
+            if source == CNKI_SOURCE:
+                if has_next != (observed_page < total_pages):
+                    raise LiteratureBatchExportError(
+                        "cnki_batch_next_state_conflict",
+                        f"page={observed_page};total={total_pages};has_next={has_next}",
+                    )
+            if has_next and row_count != 50:
+                raise LiteratureBatchExportError(
+                    "literature_batch_page_size_50_not_confirmed",
+                    f"rows={row_count}",
+                )
+            exhausted = not has_next
+            if exhausted:
+                next_token = ""
+            elif source == CNKI_SOURCE:
+                next_token = cnki_literature_batch_cursor(logical_page + 1)
+            else:
+                next_token = wanfang_literature_result_url(
+                    first_string(getattr(page, "url", "")),
+                    resource_key,
+                    logical_page + 1,
+                )
+                if not next_token:
+                    raise LiteratureBatchExportError(
+                        "wanfang_batch_next_url_invalid"
+                    )
+            page_signature = literature_batch_persisted_signature(
+                match_result,
+                next_token,
+            )
+        except LiteratureBatchExportError as exc:
+            try:
+                await clear_literature_batch_selection(page, source)
+            except Exception:
+                pass
+            literature_batch_fail(runtime, source, keyword, exc.reason, exc.detail)
+            return accepted_records, browser, context
+        persist_search_page(
+            runtime,
+            "literature",
+            source,
+            keyword,
+            list(match_result.records),
+            next_token=next_token,
+            exhausted=exhausted,
+            page_number=logical_page,
+            raw_count=match_result.raw_count,
+            page_signature=page_signature,
+        )
+        accepted_records.extend(match_result.records)
+        raw_rank_start += match_result.raw_count
+        if exhausted:
+            break
+        previous_signature = raw_signature
+        next_page = logical_page + 1
+        if source == CNKI_SOURCE:
+            advanced = await advance_cnki_literature_page(
+                page,
+                keyword,
+                previous_signature,
+                next_page,
+            )
+        else:
+            try:
+                # The Wanfang SPA can normalize a same-tab direct p=N
+                # navigation back to p=1. Keep the canonical p/s URL as the
+                # durable cursor, but advance the live page through its real
+                # next-page control.
+                if next_control is None:
+                    raise LiteratureBatchExportError(
+                        "literature_batch_next_control_unavailable"
+                    )
+                await next_control.click(timeout=5000)
+                advanced = await wait_for_literature_batch_result_change(
+                    page,
+                    source,
+                    keyword,
+                    previous_signature,
+                    next_page,
+                )
+            except Exception:
+                advanced = False
+        if not advanced:
+            literature_batch_fail(
+                runtime,
+                source,
+                keyword,
+                "literature_batch_next_page_navigation_failed",
+                f"next_page={next_page}",
+            )
+            return accepted_records, browser, context
+        logical_page = next_page
+    return accepted_records, browser, context
+
+
 async def search_profiled_browser_pages(
     runtime: SearchRuntime,
     source: str,
@@ -17699,12 +20189,24 @@ async def search_profiled_browser_pages(
     browser: Any,
     context: Any,
     query_url: str,
+    page_size: int = 50,
 ) -> tuple[list[LiteratureRecord], Any, Any]:
     profile = WEB_SOURCE_PARSER_PROFILES.get(source)
     parser = WEB_SOURCE_HTML_PARSERS.get(source)
     if profile is None or parser is None:
         runtime.skip(source, keyword, "dedicated web parser is not registered")
         return [], browser, context
+    if literature_batch_export_snapshot_required(source, "literature"):
+        return await search_literature_batch_export_pages(
+            runtime,
+            source,
+            keyword,
+            browser_type,
+            browser,
+            context,
+            query_url,
+            page_size,
+        )
     external_resume = EXTERNAL_BROWSER_SEARCH_RESUME.get()
     if (
         isinstance(external_resume, dict)
@@ -18333,7 +20835,16 @@ async def search_public_browser_literature(runtime: SearchRuntime, source: str, 
                 if browser is None:
                     raise RuntimeError(launch_error or "chromium_launch_failed")
                 context = await browser.new_context()
-                records, browser, context = await search_profiled_browser_pages(runtime, source, keyword, pw.chromium, browser, context, query_url)
+                records, browser, context = await search_profiled_browser_pages(
+                    runtime,
+                    source,
+                    keyword,
+                    pw.chromium,
+                    browser,
+                    context,
+                    query_url,
+                    limit,
+                )
                 await context.close()
                 await browser.close()
         return records
@@ -18357,7 +20868,16 @@ async def search_restricted_web_literature(runtime: SearchRuntime, source: str, 
             if not authenticated:
                 runtime.skip(source, keyword, "restricted web authentication failed after script and external control")
                 return []
-            records, browser, context = await search_profiled_browser_pages(runtime, source, keyword, pw.chromium, browser, context, query_url)
+            records, browser, context = await search_profiled_browser_pages(
+                runtime,
+                source,
+                keyword,
+                pw.chromium,
+                browser,
+                context,
+                query_url,
+                limit,
+            )
             runtime.restricted_auth(source, keyword, runtime.config.path, "success", f"restricted web metadata parsed: {len(records)} records")
             return records
     except Exception as exc:
@@ -18693,7 +21213,7 @@ async def search_wanfang_web_adapter(
     keyword: str,
     page_size: int,
 ) -> list[LiteratureRecord]:
-    del url, page_size
+    del url
     policy = literature_source_auth_policy[source]
     restricted = web_adapter_should_use_restricted_path(policy, runtime.config)
     primary_path = first_string(SEARCH_TASK_CONTEXT.get().get("path")) or (
@@ -18796,6 +21316,7 @@ async def search_wanfang_web_adapter(
                                 browser,
                                 context,
                                 resource_url,
+                                page_size,
                             )
                         )
                     except Exception as exc:
@@ -18901,6 +21422,7 @@ async def search_wanfang_web_adapter(
                                 browser,
                                 context,
                                 resource_url,
+                                page_size,
                             )
                         )
                         records.extend(retry_records)

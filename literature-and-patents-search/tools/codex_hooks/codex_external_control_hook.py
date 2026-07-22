@@ -123,6 +123,10 @@ ORDINARY_CHROME_EXTERNAL_SESSION_ATTESTATION_SCHEMA = (
     "laps_ordinary_chrome_session_attestation_v1"
 )
 ORDINARY_CHROME_EXTERNAL_SESSION_TRANSPORT = "ordinary_chrome_cdp"
+ORDINARY_CHROME_BATCH_EXPORT_SNAPSHOT_SCHEMA = "laps_browser_batch_export_v1"
+ORDINARY_CHROME_BATCH_EXPORT_LITERATURE_SOURCES = frozenset(
+    {"CNKI (中国知网)", "万方数据"}
+)
 RUNTIME_CREDENTIAL_FILL_SCHEMA = "laps_runtime_credential_fill_v1"
 RUNTIME_CREDENTIAL_BROKER_DESCRIPTOR_SCHEMA = (
     "laps_runtime_credential_broker_descriptor_v1"
@@ -1493,6 +1497,16 @@ def build_codex_extension_handoff_request(
     source = str(payload.get("source") or payload.get("channel") or "")
     keyword = str(payload.get("keyword") or payload.get("title") or "")
     event_id = str(payload.get("event_id") or "")
+    search_record_type = str(payload.get("search_record_type") or "literature")
+    batch_export_snapshot_required = (
+        search_record_type == "literature"
+        and source in ORDINARY_CHROME_BATCH_EXPORT_LITERATURE_SOURCES
+    )
+    snapshot_schema = (
+        ORDINARY_CHROME_BATCH_EXPORT_SNAPSHOT_SCHEMA
+        if batch_export_snapshot_required
+        else "laps_sanitized_search_snapshot_v1"
+    )
     institution_digest = configured_institution_identity_digest(payload)
     external_snapshot_path = ordinary_chrome_snapshot_response_path(
         response_path,
@@ -1511,7 +1525,7 @@ def build_codex_extension_handoff_request(
         "auth_state_scope": str(payload.get("auth_state_scope") or ""),
         "reason": str(payload.get("reason") or "codex_extension_handoff_requested"),
         "record_type": str(payload.get("record_type") or ""),
-        "search_record_type": str(payload.get("search_record_type") or "literature"),
+        "search_record_type": search_record_type,
         "title": str(payload.get("title") or ""),
         "doi": str(payload.get("doi") or ""),
         "access_mode": str(payload.get("access_mode") or ""),
@@ -1558,13 +1572,11 @@ def build_codex_extension_handoff_request(
             "event_id": event_id,
             "source": source,
             "keyword": keyword,
-            "search_record_type": str(
-                payload.get("search_record_type") or "literature"
-            ),
+            "search_record_type": search_record_type,
             "auth_state_scope": str(payload.get("auth_state_scope") or ""),
             "institution_identity_digest": institution_digest,
             "snapshot_path": external_snapshot_path,
-            "snapshot_schema": "laps_sanitized_search_snapshot_v1",
+            "snapshot_schema": snapshot_schema,
             "requires_authenticated_search_page": event == "auth_challenge",
             "requires_dedicated_parser_evidence": True,
         },
@@ -1665,6 +1677,15 @@ def build_codex_extension_handoff_request(
             ),
         },
     }
+    if batch_export_snapshot_required:
+        request["result_batch_export"] = (
+            dict(payload.get("result_batch_export") or {})
+            if isinstance(payload.get("result_batch_export"), dict)
+            else {}
+        )
+        request["external_browser_resume"]["snapshot_paths"] = [
+            external_snapshot_path
+        ]
     if extension_raw_url_allowed():
         for key in ("raw_current_url", "raw_candidate_url", "raw_entry_url", "raw_url"):
             value = str(payload.get(key) or "").strip()
@@ -1927,7 +1948,7 @@ def ordinary_chrome_external_snapshot_paths(
     singular = str(response.get("sanitized_search_snapshot_path") or "").strip()
     if singular and singular not in paths:
         paths.insert(0, singular)
-    return [value for value in paths if value][:100]
+    return [value for value in paths if value]
 
 
 def path_is_within(path: Path, parent: Path) -> bool:
@@ -1936,6 +1957,405 @@ def path_is_within(path: Path, parent: Path) -> bool:
         return True
     except (OSError, ValueError):
         return False
+
+
+ORDINARY_CHROME_BATCH_EXPORT_SNAPSHOT_FIELDS = frozenset(
+    {
+        "schema",
+        "event_id",
+        "source",
+        "keyword",
+        "auth_state_scope",
+        "search_record_type",
+        "checkpoint_path",
+        "resource_key",
+        "page_number",
+        "page_size",
+        "final_url",
+        "html",
+        "result_count",
+        "selected_before",
+        "exports",
+        "next_page_number",
+        "next_url",
+        "has_next_control",
+        "explicit_no_results",
+        "exhausted",
+        "created_at",
+    }
+)
+ORDINARY_CHROME_BATCH_EXPORT_ENTRY_FIELDS = frozenset(
+    {
+        "batch_number",
+        "selected_count",
+        "export_url",
+        "export_html",
+        "export_count",
+        "selected_after_clear",
+    }
+)
+ORDINARY_CHROME_SNAPSHOT_FORBIDDEN_MARKUP = re.compile(
+    r"<(?:script|style|form|input|textarea|select|button|iframe|object|embed|meta|link|img)\b",
+    re.IGNORECASE,
+)
+ORDINARY_CHROME_SNAPSHOT_ALLOWED_HTML_ATTRIBUTES = frozenset(
+    {"class", "title", "datetime", "content", "name", "rel", "href"}
+)
+ORDINARY_CHROME_SNAPSHOT_SECRET_QUERY_KEY = re.compile(
+    r"(?:token|session|cookie|password|credential|authorization|secret|api[_-]?key|ticket|signature|signed)",
+    re.IGNORECASE,
+)
+
+
+def ordinary_chrome_batch_export_snapshot_required(
+    source: str,
+    record_type: str,
+) -> bool:
+    return (
+        str(record_type or "").strip() == "literature"
+        and str(source or "").strip()
+        in ORDINARY_CHROME_BATCH_EXPORT_LITERATURE_SOURCES
+    )
+
+
+def ordinary_chrome_snapshot_integer(value: Any, minimum: int = 0) -> bool:
+    return (
+        isinstance(value, int)
+        and not isinstance(value, bool)
+        and value >= minimum
+    )
+
+
+def ordinary_chrome_snapshot_html_valid(value: Any, source: str) -> bool:
+    if (
+        not isinstance(value, str)
+        or not value.strip()
+        or ORDINARY_CHROME_SNAPSHOT_FORBIDDEN_MARKUP.search(value)
+    ):
+        return False
+    try:
+        from html.parser import HTMLParser
+
+        allowed_suffixes = (
+            ("cnki.net", "doi.org")
+            if source == "CNKI (中国知网)"
+            else ("wanfangdata.com.cn", "doi.org")
+        )
+
+        class SnapshotHTMLValidator(HTMLParser):
+            def __init__(self) -> None:
+                super().__init__(convert_charrefs=True)
+                self.valid = True
+
+            def handle_starttag(
+                self,
+                tag: str,
+                attrs: list[tuple[str, str | None]],
+            ) -> None:
+                del tag
+                for raw_name, raw_value in attrs:
+                    name = str(raw_name or "").strip().casefold()
+                    if name not in ORDINARY_CHROME_SNAPSHOT_ALLOWED_HTML_ATTRIBUTES:
+                        self.valid = False
+                        return
+                    if name != "href":
+                        continue
+                    href = str(raw_value or "").strip()
+                    if not href:
+                        continue
+                    try:
+                        raw_href_parts = urlsplit(href)
+                        sensitive_query = any(
+                            ORDINARY_CHROME_SNAPSHOT_SECRET_QUERY_KEY.search(
+                                str(key or "")
+                            )
+                            for key, _ in parse_qsl(
+                                raw_href_parts.query,
+                                keep_blank_values=True,
+                            )
+                        )
+                    except ValueError:
+                        self.valid = False
+                        return
+                    if (
+                        raw_href_parts.username is not None
+                        or raw_href_parts.password is not None
+                        or raw_href_parts.fragment
+                        or sensitive_query
+                    ):
+                        self.valid = False
+                        return
+                    if not raw_href_parts.scheme and not raw_href_parts.netloc:
+                        continue
+                    href_valid, href_parts = ordinary_chrome_snapshot_https_url(
+                        href
+                    )
+                    if not href_valid:
+                        self.valid = False
+                        return
+                    hostname = (href_parts.hostname or "").casefold().rstrip(".")
+                    if not any(
+                        hostname == suffix or hostname.endswith(f".{suffix}")
+                        for suffix in allowed_suffixes
+                    ):
+                        self.valid = False
+                        return
+
+            def handle_startendtag(
+                self,
+                tag: str,
+                attrs: list[tuple[str, str | None]],
+            ) -> None:
+                self.handle_starttag(tag, attrs)
+
+        validator = SnapshotHTMLValidator()
+        validator.feed(value)
+        validator.close()
+        return validator.valid
+    except Exception:
+        return False
+
+
+def ordinary_chrome_snapshot_https_url(
+    value: Any,
+    *,
+    expected_host: str = "",
+    expected_path: str = "",
+) -> tuple[bool, Any]:
+    try:
+        parsed = urlsplit(str(value or ""))
+    except ValueError:
+        return False, None
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or bool(parsed.fragment)
+        or (expected_host and parsed.hostname.casefold() != expected_host)
+        or (expected_path and parsed.path != expected_path)
+    ):
+        return False, parsed
+    try:
+        query_pairs = parse_qsl(parsed.query, keep_blank_values=True)
+    except ValueError:
+        return False, parsed
+    if any(
+        ORDINARY_CHROME_SNAPSHOT_SECRET_QUERY_KEY.search(str(key or ""))
+        for key, _ in query_pairs
+    ):
+        return False, parsed
+    return True, parsed
+
+
+def validate_ordinary_chrome_batch_export_snapshot(
+    loaded: dict[str, Any],
+    *,
+    expected_source: str,
+    expected_keyword: str,
+    expected_event_id: str,
+    expected_scope: str,
+    expected_record_type: str,
+    expected_checkpoint_path: str,
+    expected_resource_key: str,
+) -> tuple[bool, str]:
+    if set(loaded) != ORDINARY_CHROME_BATCH_EXPORT_SNAPSHOT_FIELDS:
+        return False, "ordinary_chrome_batch_export_snapshot_fields_invalid"
+    if loaded.get("schema") != ORDINARY_CHROME_BATCH_EXPORT_SNAPSHOT_SCHEMA:
+        return False, "ordinary_chrome_batch_export_snapshot_required"
+    if str(loaded.get("source") or "") != expected_source:
+        return False, "ordinary_chrome_snapshot_source_mismatch"
+    if str(loaded.get("keyword") or "") != expected_keyword:
+        return False, "ordinary_chrome_snapshot_keyword_mismatch"
+    if str(loaded.get("event_id") or "") != expected_event_id:
+        return False, "ordinary_chrome_snapshot_event_mismatch"
+    if str(loaded.get("auth_state_scope") or "") != expected_scope:
+        return False, "ordinary_chrome_snapshot_scope_mismatch"
+    if str(loaded.get("search_record_type") or "") != expected_record_type:
+        return False, "ordinary_chrome_snapshot_record_type_mismatch"
+    source = str(loaded.get("source") or "")
+    checkpoint_path = loaded.get("checkpoint_path")
+    resource_key = loaded.get("resource_key")
+    if (
+        not isinstance(checkpoint_path, str)
+        or not checkpoint_path.strip()
+        or not isinstance(resource_key, str)
+    ):
+        return False, "ordinary_chrome_batch_export_snapshot_checkpoint_invalid"
+    if checkpoint_path != expected_checkpoint_path:
+        return False, "ordinary_chrome_batch_export_snapshot_checkpoint_mismatch"
+    if resource_key != expected_resource_key:
+        return False, "ordinary_chrome_batch_export_snapshot_resource_mismatch"
+    page_number = loaded.get("page_number")
+    result_count = loaded.get("result_count")
+    if (
+        not ordinary_chrome_snapshot_integer(page_number, 1)
+        or loaded.get("page_size") != 50
+        or not ordinary_chrome_snapshot_integer(result_count)
+        or result_count > 50
+        or not ordinary_chrome_snapshot_integer(loaded.get("selected_before"))
+        or loaded.get("selected_before") != 0
+    ):
+        return False, "ordinary_chrome_batch_export_snapshot_counts_invalid"
+    if not ordinary_chrome_snapshot_html_valid(loaded.get("html"), source):
+        return False, "ordinary_chrome_snapshot_contains_forbidden_markup"
+
+    final_url_valid, final_parts = ordinary_chrome_snapshot_https_url(
+        loaded.get("final_url")
+    )
+    if not final_url_valid:
+        return False, "ordinary_chrome_snapshot_final_url_invalid"
+    if source == "CNKI (中国知网)":
+        if final_parts.hostname.casefold() != "kns.cnki.net" or resource_key:
+            return False, "ordinary_chrome_batch_export_snapshot_resource_invalid"
+        export_host = "kns.cnki.net"
+        export_path = "/dm8/manage/export.html"
+    elif source == "万方数据":
+        if resource_key not in {"periodical", "thesis", "conference", "nstr"}:
+            return False, "ordinary_chrome_batch_export_snapshot_resource_invalid"
+        if not checkpoint_path.endswith(f":{resource_key}"):
+            return False, "ordinary_chrome_batch_export_snapshot_resource_invalid"
+        if (
+            final_parts.hostname.casefold() != "s.wanfangdata.com.cn"
+            or final_parts.path.rstrip("/") != f"/{resource_key}"
+        ):
+            return False, "ordinary_chrome_batch_export_snapshot_resource_invalid"
+        final_query_pairs = parse_qsl(final_parts.query, keep_blank_values=True)
+        final_s_values = [value for key, value in final_query_pairs if key == "s"]
+        final_p_values = [value for key, value in final_query_pairs if key == "p"]
+        final_q_values = [value for key, value in final_query_pairs if key == "q"]
+        if (
+            final_s_values != ["50"]
+            or len(final_q_values) != 1
+            or not final_q_values[0].strip()
+            or " ".join(
+                unicodedata.normalize("NFKC", final_q_values[0])
+                .casefold()
+                .strip()
+                .strip('"')
+                .split()
+            )
+            != " ".join(
+                unicodedata.normalize("NFKC", expected_keyword)
+                .casefold()
+                .strip()
+                .strip('"')
+                .split()
+            )
+        ):
+            return False, "ordinary_chrome_batch_export_snapshot_page_size_invalid"
+        if final_p_values != [str(page_number)]:
+            return False, "ordinary_chrome_batch_export_snapshot_page_number_invalid"
+        export_host = "www.wanfangdata.com.cn"
+        export_path = "/export"
+    else:
+        return False, "ordinary_chrome_batch_export_snapshot_source_invalid"
+
+    exports = loaded.get("exports")
+    if not isinstance(exports, list):
+        return False, "ordinary_chrome_batch_export_snapshot_exports_invalid"
+    selected_total = 0
+    for expected_batch_number, export in enumerate(exports, start=1):
+        if not isinstance(export, dict) or set(export) != ORDINARY_CHROME_BATCH_EXPORT_ENTRY_FIELDS:
+            return False, "ordinary_chrome_batch_export_snapshot_export_fields_invalid"
+        selected_count = export.get("selected_count")
+        if (
+            export.get("batch_number") != expected_batch_number
+            or not ordinary_chrome_snapshot_integer(selected_count, 1)
+            or selected_count > 50
+            or not ordinary_chrome_snapshot_integer(export.get("export_count"))
+            or export.get("export_count") != selected_count
+            or not ordinary_chrome_snapshot_integer(export.get("selected_after_clear"))
+            or export.get("selected_after_clear") != 0
+        ):
+            return False, "ordinary_chrome_batch_export_snapshot_counts_invalid"
+        export_url_valid, _ = ordinary_chrome_snapshot_https_url(
+            export.get("export_url"),
+            expected_host=export_host,
+            expected_path=export_path,
+        )
+        if not export_url_valid:
+            return False, "ordinary_chrome_batch_export_snapshot_export_url_invalid"
+        if not ordinary_chrome_snapshot_html_valid(export.get("export_html"), source):
+            return False, "ordinary_chrome_snapshot_contains_forbidden_markup"
+        selected_total += selected_count
+    if selected_total != result_count or bool(exports) != bool(result_count):
+        return False, "ordinary_chrome_batch_export_snapshot_counts_invalid"
+
+    explicit_no_results = loaded.get("explicit_no_results")
+    has_next_control = loaded.get("has_next_control")
+    exhausted = loaded.get("exhausted")
+    if not all(
+        isinstance(value, bool)
+        for value in (explicit_no_results, has_next_control, exhausted)
+    ):
+        return False, "ordinary_chrome_batch_export_snapshot_pagination_invalid"
+    if (
+        explicit_no_results
+        and (result_count != 0 or has_next_control or not exhausted)
+    ):
+        return False, "ordinary_chrome_batch_export_snapshot_pagination_invalid"
+    if (result_count == 0) != explicit_no_results:
+        return False, "ordinary_chrome_batch_export_snapshot_pagination_invalid"
+    if not exhausted and result_count != 50:
+        return False, "ordinary_chrome_batch_export_snapshot_page_size_invalid"
+    next_page_number = loaded.get("next_page_number")
+    next_url = loaded.get("next_url")
+    if not isinstance(next_url, str):
+        return False, "ordinary_chrome_batch_export_snapshot_pagination_invalid"
+    if has_next_control:
+        if exhausted or next_page_number != page_number + 1:
+            return False, "ordinary_chrome_batch_export_snapshot_pagination_invalid"
+        if source == "CNKI (中国知网)":
+            if next_url:
+                return False, "ordinary_chrome_batch_export_snapshot_pagination_invalid"
+        else:
+            next_url_valid, next_parts = ordinary_chrome_snapshot_https_url(
+                next_url,
+                expected_host="s.wanfangdata.com.cn",
+                expected_path=f"/{resource_key}",
+            )
+            if not next_url_valid:
+                return False, "ordinary_chrome_batch_export_snapshot_next_url_invalid"
+            next_query_pairs = parse_qsl(next_parts.query, keep_blank_values=True)
+            next_p_values = [value for key, value in next_query_pairs if key == "p"]
+            next_s_values = [value for key, value in next_query_pairs if key == "s"]
+            next_q_values = [value for key, value in next_query_pairs if key == "q"]
+            canonical_next_query = [
+                (key, value)
+                for key, value in next_query_pairs
+                if key.casefold() not in {"p", "s"}
+            ]
+            canonical_next_query.extend(
+                (("p", str(next_page_number)), ("s", "50"))
+            )
+            canonical_next_url = urlunsplit(
+                (
+                    "https",
+                    "s.wanfangdata.com.cn",
+                    f"/{resource_key}",
+                    urlencode(canonical_next_query),
+                    "",
+                )
+            )
+            if (
+                next_p_values != [str(next_page_number)]
+                or next_s_values != ["50"]
+                or next_q_values != final_q_values
+                or next_url != canonical_next_url
+            ):
+                return False, "ordinary_chrome_batch_export_snapshot_next_url_invalid"
+    elif not exhausted or next_page_number is not None or next_url:
+        return False, "ordinary_chrome_batch_export_snapshot_pagination_invalid"
+
+    created_at = loaded.get("created_at")
+    try:
+        created = datetime.fromisoformat(str(created_at or "").replace("Z", "+00:00"))
+    except ValueError:
+        return False, "ordinary_chrome_batch_export_snapshot_created_at_invalid"
+    if created.tzinfo is None:
+        return False, "ordinary_chrome_batch_export_snapshot_created_at_invalid"
+    return True, "ordinary_chrome_batch_export_snapshot_valid"
 
 
 def validate_ordinary_chrome_snapshot_file(
@@ -1947,6 +2367,8 @@ def validate_ordinary_chrome_snapshot_file(
     expected_event_id: str,
     expected_scope: str,
     expected_record_type: str,
+    expected_checkpoint_path: str = "",
+    expected_resource_key: str = "",
 ) -> tuple[bool, str]:
     try:
         path = Path(path_value).expanduser().resolve()
@@ -1960,7 +2382,25 @@ def validate_ordinary_chrome_snapshot_file(
         loaded = json.loads(path.read_text(encoding="utf-8-sig"))
     except (OSError, json.JSONDecodeError):
         return False, "ordinary_chrome_snapshot_invalid_json"
-    if not isinstance(loaded, dict) or loaded.get("schema") != "laps_sanitized_search_snapshot_v1":
+    if not isinstance(loaded, dict):
+        return False, "ordinary_chrome_snapshot_invalid_schema"
+    if ordinary_chrome_batch_export_snapshot_required(
+        expected_source,
+        expected_record_type,
+    ):
+        if loaded.get("schema") != ORDINARY_CHROME_BATCH_EXPORT_SNAPSHOT_SCHEMA:
+            return False, "ordinary_chrome_batch_export_snapshot_required"
+        return validate_ordinary_chrome_batch_export_snapshot(
+            loaded,
+            expected_source=expected_source,
+            expected_keyword=expected_keyword,
+            expected_event_id=expected_event_id,
+            expected_scope=expected_scope,
+            expected_record_type=expected_record_type,
+            expected_checkpoint_path=expected_checkpoint_path,
+            expected_resource_key=expected_resource_key,
+        )
+    if loaded.get("schema") != "laps_sanitized_search_snapshot_v1":
         return False, "ordinary_chrome_snapshot_invalid_schema"
     if expected_source and str(loaded.get("source") or "") != expected_source:
         return False, "ordinary_chrome_snapshot_source_mismatch"
@@ -2041,7 +2481,14 @@ def validate_ordinary_chrome_external_session_response(
     }
     for key, mismatch_reason in comparisons.items():
         expected_value = str(expected.get(key) or "")
-        if expected_value and str(attestation.get(key) or "") != expected_value:
+        exact_even_when_empty = key in {
+            "auth_state_scope",
+            "institution_identity_digest",
+        }
+        if (
+            (expected_value or exact_even_when_empty)
+            and str(attestation.get(key) or "") != expected_value
+        ):
             return False, mismatch_reason
 
     snapshot_paths = ordinary_chrome_external_snapshot_paths(response)
@@ -2052,6 +2499,63 @@ def validate_ordinary_chrome_external_session_response(
     expected_event_id = str(expected.get("event_id") or "")
     expected_scope = str(expected.get("auth_state_scope") or "")
     expected_record_type = str(expected.get("search_record_type") or "literature")
+    batch_export_required = ordinary_chrome_batch_export_snapshot_required(
+        expected_source,
+        expected_record_type,
+    )
+    if batch_export_required and expected.get("snapshot_schema") != ORDINARY_CHROME_BATCH_EXPORT_SNAPSHOT_SCHEMA:
+        return False, "ordinary_chrome_external_session_request_contract_invalid"
+    batch_export_request = (
+        request.get("result_batch_export")
+        if batch_export_required and isinstance(request, dict)
+        else None
+    )
+    if batch_export_required and not isinstance(batch_export_request, dict):
+        return False, "ordinary_chrome_external_session_request_contract_invalid"
+    expected_checkpoint_path = (
+        str(batch_export_request.get("checkpoint_path") or "")
+        if isinstance(batch_export_request, dict)
+        else ""
+    )
+    raw_expected_resource_key = (
+        batch_export_request.get("resource_key")
+        if isinstance(batch_export_request, dict)
+        else ""
+    )
+    if batch_export_required and (
+        not expected_checkpoint_path
+        or not isinstance(raw_expected_resource_key, str)
+    ):
+        return False, "ordinary_chrome_external_session_request_contract_invalid"
+    expected_resource_key = str(raw_expected_resource_key or "")
+    expected_batch_size = (
+        batch_export_request.get("batch_size")
+        if isinstance(batch_export_request, dict)
+        else None
+    )
+    expected_resume_cursor = (
+        str(batch_export_request.get("resume_cursor") or "")
+        if isinstance(batch_export_request, dict)
+        else ""
+    )
+    if batch_export_required and (
+        not ordinary_chrome_snapshot_integer(expected_batch_size, 1)
+        or expected_batch_size > 50
+    ):
+        return False, "ordinary_chrome_external_session_request_contract_invalid"
+    if batch_export_required:
+        if expected_source == "CNKI (中国知网)" and expected_resource_key:
+            return False, "ordinary_chrome_external_session_request_contract_invalid"
+        if expected_source == "万方数据" and expected_resource_key not in {
+            "periodical",
+            "thesis",
+            "conference",
+            "nstr",
+        }:
+            return False, "ordinary_chrome_external_session_request_contract_invalid"
+    if batch_export_required and len(snapshot_paths) != len(set(snapshot_paths)):
+        return False, "ordinary_chrome_batch_export_snapshot_order_invalid"
+    batch_order: list[tuple[str, str, int, bool, bool]] = []
     for path_value in snapshot_paths:
         valid, reason = validate_ordinary_chrome_snapshot_file(
             path_value,
@@ -2061,9 +2565,119 @@ def validate_ordinary_chrome_external_session_response(
             expected_event_id=expected_event_id,
             expected_scope=expected_scope,
             expected_record_type=expected_record_type,
+            expected_checkpoint_path=expected_checkpoint_path,
+            expected_resource_key=expected_resource_key,
         )
         if not valid:
             return False, reason
+        if batch_export_required:
+            try:
+                loaded_snapshot = json.loads(
+                    Path(path_value).expanduser().resolve().read_text(
+                        encoding="utf-8-sig"
+                    )
+                )
+            except (OSError, RuntimeError, ValueError, json.JSONDecodeError):
+                return False, "ordinary_chrome_snapshot_invalid_json"
+            if any(
+                not isinstance(export, dict)
+                or int(export.get("selected_count") or 0) > expected_batch_size
+                for export in loaded_snapshot.get("exports") or []
+            ):
+                return False, "ordinary_chrome_batch_export_snapshot_batch_limit_exceeded"
+            batch_order.append(
+                (
+                    str(loaded_snapshot.get("checkpoint_path") or ""),
+                    str(loaded_snapshot.get("resource_key") or ""),
+                    int(loaded_snapshot.get("page_number") or 0),
+                    loaded_snapshot.get("has_next_control") is True,
+                    loaded_snapshot.get("exhausted") is True,
+                )
+            )
+    if batch_export_required:
+        for index, current in enumerate(batch_order):
+            checkpoint_path, resource_key, page_number, _, _ = current
+            if (
+                checkpoint_path != expected_checkpoint_path
+                or resource_key != expected_resource_key
+            ):
+                return False, "ordinary_chrome_batch_export_snapshot_order_invalid"
+            if index == 0:
+                continue
+            previous = batch_order[index - 1]
+            if not previous[3] or page_number != previous[2] + 1:
+                return False, "ordinary_chrome_batch_export_snapshot_order_invalid"
+        if not batch_order:
+            return False, "ordinary_chrome_batch_export_snapshot_order_invalid"
+        expected_first_page = 1
+        if expected_resume_cursor:
+            if expected_source == "CNKI (中国知网)":
+                cursor_match = re.fullmatch(
+                    r"laps-cnki-batch-page-v1:(\d+)",
+                    expected_resume_cursor,
+                )
+                if not cursor_match:
+                    return False, "ordinary_chrome_external_session_request_contract_invalid"
+                expected_first_page = int(cursor_match.group(1))
+            else:
+                cursor_valid, cursor_parts = ordinary_chrome_snapshot_https_url(
+                    expected_resume_cursor,
+                    expected_host="s.wanfangdata.com.cn",
+                    expected_path=f"/{expected_resource_key}",
+                )
+                cursor_query = (
+                    parse_qsl(cursor_parts.query, keep_blank_values=True)
+                    if cursor_valid
+                    else []
+                )
+                cursor_p = [value for key, value in cursor_query if key == "p"]
+                cursor_s = [value for key, value in cursor_query if key == "s"]
+                cursor_q = [value for key, value in cursor_query if key == "q"]
+                try:
+                    expected_first_page = int(cursor_p[0])
+                except (IndexError, TypeError, ValueError):
+                    return False, "ordinary_chrome_external_session_request_contract_invalid"
+                canonical_cursor_query = [
+                    (key, value)
+                    for key, value in cursor_query
+                    if key.casefold() not in {"p", "s"}
+                ]
+                canonical_cursor_query.extend(
+                    (("p", str(expected_first_page)), ("s", "50"))
+                )
+                canonical_cursor = urlunsplit(
+                    (
+                        "https",
+                        "s.wanfangdata.com.cn",
+                        f"/{expected_resource_key}",
+                        urlencode(canonical_cursor_query),
+                        "",
+                    )
+                )
+                if (
+                    not cursor_valid
+                    or cursor_s != ["50"]
+                    or len(cursor_q) != 1
+                    or " ".join(
+                        unicodedata.normalize("NFKC", cursor_q[0])
+                        .casefold()
+                        .strip()
+                        .strip('"')
+                        .split()
+                    )
+                    != " ".join(
+                        unicodedata.normalize("NFKC", expected_keyword)
+                        .casefold()
+                        .strip()
+                        .strip('"')
+                        .split()
+                    )
+                    or expected_first_page < 1
+                    or expected_resume_cursor != canonical_cursor
+                ):
+                    return False, "ordinary_chrome_external_session_request_contract_invalid"
+        if batch_order[0][2] != expected_first_page:
+            return False, "ordinary_chrome_batch_export_snapshot_order_invalid"
     return True, "ordinary_chrome_external_session_valid"
 
 
@@ -9052,6 +9666,13 @@ def search_next_page_state(page: Any, payload: dict[str, Any]) -> tuple[bool, st
 
 
 def save_sanitized_search_snapshot(page: Any, root: Path, event_name: str, payload: dict[str, Any]) -> str:
+    source = str(payload.get("source") or payload.get("channel") or "")
+    record_type = str(payload.get("search_record_type") or "literature")
+    if ordinary_chrome_batch_export_snapshot_required(source, record_type):
+        # These sources require a complete, ordered result+export snapshot set.
+        # The generic hook is intentionally read-only and cannot manufacture
+        # that evidence from result cards alone.
+        return ""
     selectors = [str(value).strip() for value in payload.get("result_card_selectors") or [] if str(value).strip()]
     if not selectors:
         return ""
